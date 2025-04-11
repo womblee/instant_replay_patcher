@@ -2,13 +2,17 @@
 
 A lightweight tool that enables NVIDIA Shadowplay to record content normally flagged as "restricted" by bypassing NVIDIA's content detection mechanisms.
 
-![NVIDIA Shadowplay Restriction Bypass Tool](https://github.com/user-attachments/assets/36724781-6966-42cc-ab35-bf0506bcf28d)
+![NVIDIA_Overlay_Wealthy-Grouse_11 04 2025](https://github.com/user-attachments/assets/39dc7809-32ec-4fc6-b8f6-be52067e78b2)
+
+![NVIDIA_Overlay_Closed-Hagfish_11 04 2025](https://github.com/user-attachments/assets/6722c535-24f9-44de-aea0-b7bf5f338935)
 
 ## Key Features
 - **Automatic Detection**: Monitors and automatically patches the NVIDIA Container process (nvcontainer.exe)
 - **Protection Bypasses**: 
   - Patches `GetWindowDisplayAffinity` to prevent screen content protection detection.
   - Patches `Module32FirstW` to prevent process scanning mechanisms.
+- **Undo Patches**:
+  - Revert the patches back to normal (only works for one session).
 - **Options**:
   - Run at Windows startup option.
   - Auto-close after successful patching option.
