@@ -1,4 +1,4 @@
-# NVIDIA Patcher - NVIDIA Recording Restriction Bypass
+# NVIDIA Patcher - Shadowplay Recording Restriction Bypass
 
 A lightweight tool that enables NVIDIA Shadowplay to record content normally flagged as "restricted" by bypassing NVIDIA's content detection mechanisms.
 
