@@ -13,8 +13,13 @@
 #include <thread>
 #include <chrono>
 #include <Windows.h>
+#include <ctime>
 
 #pragma comment(lib, "d3d11.lib")
+
+// Copyright information
+#define COPYRIGHT_INFO "by nloginov, credit furyzenblade"
+#define VERSION "1.1.0"
 
 // Forward declarations
 extern IMGUI_IMPL_API LRESULT ImGui_ImplWin32_WndProcHandler(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam);
@@ -28,21 +33,38 @@ static ID3D11DeviceContext* g_device_context = NULL;
 static IDXGISwapChain* g_swap_chain = NULL;
 static ID3D11RenderTargetView* g_main_render_target_view = NULL;
 
-// Patch status tracking
-struct patch_status
-{
+// Original bytes storage for patch restoration
+struct original_bytes {
+    std::vector<uint8_t> window_display_affinity_bytes;
+    std::vector<uint8_t> module32_first_w_bytes;
+    uintptr_t wda_address = 0;
+    uintptr_t m32fw_address = 0;
+};
+
+// Patch status tracking with improved logging
+struct patch_status {
     bool wait_for_process = true;
     bool is_running = true;
     bool is_patched = false;
     bool startup_enabled = false;
     bool auto_close = false;
+    bool undo_available = false;
+    DWORD target_process_id = 0;
     std::string status_message = "Waiting for nvcontainer.exe...";
     std::string detailed_log;
+    original_bytes orig_bytes;
+
+    // Log levels
+    enum LogLevel {
+        INFO,
+        WARNING,
+        ERR,
+        SUCCESS
+    };
 };
 
 // Function to set startup registry
-bool set_startup(bool enable)
-{
+bool set_startup(bool enable) {
     HKEY h_key;
     const char* key_path = "SOFTWARE\\Microsoft\\Windows\\CurrentVersion\\Run";
 
@@ -52,8 +74,7 @@ bool set_startup(bool enable)
     char exe_path[MAX_PATH];
     GetModuleFileNameA(NULL, exe_path, MAX_PATH);
 
-    if (enable)
-    {
+    if (enable) {
         std::string command = std::string(exe_path);
         RegSetValueExA(h_key, "NvPatcher", 0, REG_SZ, (BYTE*)command.c_str(), command.length() + 1);
     }
@@ -65,8 +86,7 @@ bool set_startup(bool enable)
 }
 
 // Check if startup is enabled
-bool is_startup_enabled()
-{
+bool is_startup_enabled() {
     HKEY h_key;
     const char* key_path = "SOFTWARE\\Microsoft\\Windows\\CurrentVersion\\Run";
 
@@ -83,44 +103,117 @@ bool is_startup_enabled()
     return exists;
 }
 
-// Add a log message
-void add_log(patch_status& status, const std::string& message)
-{
-    status.detailed_log += message + "\n";
+// Get current timestamp for logs
+std::string get_timestamp() {
+    auto now = std::chrono::system_clock::now();
+    std::time_t time = std::chrono::system_clock::to_time_t(now);
+
+    char buffer[80];
+    struct tm timeinfo;
+    localtime_s(&timeinfo, &time);
+    strftime(buffer, sizeof(buffer), "%H:%M:%S", &timeinfo);
+
+    return std::string(buffer);
+}
+
+// Improved add_log function with log levels
+void add_log(patch_status& status, const std::string& message, patch_status::LogLevel level = patch_status::LogLevel::INFO) {
+    std::string prefix;
+
+    switch (level) {
+    case patch_status::LogLevel::INFO:
+        prefix = "[INFO]";
+        break;
+    case patch_status::LogLevel::WARNING:
+        prefix = "[WARNING]";
+        break;
+    case patch_status::LogLevel::ERR:
+        prefix = "[ERROR]";
+        break;
+    case patch_status::LogLevel::SUCCESS:
+        prefix = "[SUCCESS]";
+        break;
+    }
+
+    std::string timestamp = get_timestamp();
+    std::string formatted_message = "[" + timestamp + "] " + prefix + " " + message;
+    status.detailed_log += formatted_message + "\n";
     status.status_message = message;
 }
 
-int patch_get_window_display_affinity(HANDLE h_process, patch_status& status)
-{
+// Function to check if a process has already been patched
+bool is_process_patched(HANDLE h_process, uintptr_t target_address, patch_status& status) {
+    std::vector<uint8_t> current_bytes(7, 0);
+    SIZE_T bytes_read;
+
+    if (!ReadProcessMemory(h_process, (LPCVOID)target_address, current_bytes.data(), current_bytes.size(), &bytes_read)) {
+        add_log(status, "Failed to read memory for patch check", patch_status::LogLevel::ERR);
+        return false;
+    }
+
+    // Check if the first byte is a JMP instruction (0xE9)
+    return current_bytes[0] == 0xE9;
+}
+
+// Function to back up original bytes before patching
+bool backup_original_bytes(HANDLE h_process, uintptr_t target_address, std::vector<uint8_t>& backup, size_t size) {
+    backup.resize(size, 0);
+    SIZE_T bytes_read;
+
+    return ReadProcessMemory(h_process, (LPCVOID)target_address, backup.data(), size, &bytes_read) && bytes_read == size;
+}
+
+// Function to restore original bytes (undo patch)
+bool restore_original_bytes(HANDLE h_process, uintptr_t target_address, const std::vector<uint8_t>& original_bytes) {
+    if (original_bytes.empty() || target_address == 0) {
+        return false;
+    }
+
+    return write_memory_with_protection(h_process, target_address, original_bytes.data(), original_bytes.size());
+}
+
+int patch_get_window_display_affinity(HANDLE h_process, patch_status& status) {
     // Get USER32.dll base address
     uintptr_t remote_user32_base = get_remote_module_base_address(h_process, L"USER32.dll");
-    if (!remote_user32_base)
-    {
-        add_log(status, "Error: Could not get USER32.dll base address");
+    if (!remote_user32_base) {
+        add_log(status, "Could not get USER32.dll base address", patch_status::LogLevel::ERR);
         return 1;
     }
 
-    add_log(status, "Info: Found USER32.dll base address: 0x" + int_to_hex(remote_user32_base));
+    add_log(status, "Found USER32.dll base address: 0x" + int_to_hex(remote_user32_base), patch_status::LogLevel::INFO);
 
     // Get the address of the target function
     uintptr_t remote_target_address = get_exported_function_address(h_process, remote_user32_base, L"USER32.dll", "GetWindowDisplayAffinity");
-    if (!remote_target_address)
-    {
-        add_log(status, "Error: Could not get remote address of GetWindowDisplayAffinity");
+    if (!remote_target_address) {
+        add_log(status, "Could not get remote address of GetWindowDisplayAffinity", patch_status::LogLevel::ERR);
         return 1;
     }
 
-    add_log(status, "Info: Found address of GetWindowDisplayAffinity: 0x" + int_to_hex(remote_target_address));
+    add_log(status, "Found address of GetWindowDisplayAffinity: 0x" + int_to_hex(remote_target_address), patch_status::LogLevel::INFO);
+
+    // Store the address for later undo
+    status.orig_bytes.wda_address = remote_target_address;
+
+    // Check if already patched
+    if (is_process_patched(h_process, remote_target_address, status)) {
+        add_log(status, "GetWindowDisplayAffinity already appears to be patched", patch_status::LogLevel::WARNING);
+        return 0; // Consider this a success, it's already patched
+    }
+
+    // Backup original bytes before patching
+    if (!backup_original_bytes(h_process, remote_target_address, status.orig_bytes.window_display_affinity_bytes, 6)) {
+        add_log(status, "Failed to backup original bytes before patching", patch_status::LogLevel::ERR);
+        return 1;
+    }
 
     // Allocate memory in the target process
     uintptr_t allocated_memory = allocate_memory_near_address(h_process, remote_target_address, 0x1000);
-    if (!allocated_memory)
-    {
-        add_log(status, "Error: Could not allocate memory near target address");
+    if (!allocated_memory) {
+        add_log(status, "Could not allocate memory near target address", patch_status::LogLevel::ERR);
         return 1;
     }
 
-    add_log(status, "Info: Allocated 1kb of memory at: 0x" + int_to_hex(allocated_memory));
+    add_log(status, "Allocated 1kb of memory at: 0x" + int_to_hex(allocated_memory), patch_status::LogLevel::INFO);
 
     // Place payload at new memory location
     if (!write_memory_with_protection_dynamic(h_process, allocated_memory,
@@ -129,68 +222,77 @@ int patch_get_window_display_affinity(HANDLE h_process, patch_status& status)
             0xC3                // ret
         })
         ) {
-        add_log(status, "Error: Could not write payload to allocated memory region");
+        add_log(status, "Could not write payload to allocated memory region", patch_status::LogLevel::ERR);
         return 1;
     }
 
-    add_log(status, "Info: Payload written successfully to allocated memory region.");
+    add_log(status, "Payload written successfully to allocated memory region", patch_status::LogLevel::INFO);
 
     // Assemble the JMP instruction
     std::array<uint8_t, 5> jmp_instruction_bytes;
-    if (!assemble_jump_near_instruction(jmp_instruction_bytes.data(), remote_target_address, allocated_memory))
-    {
-        add_log(status, "Error: Allocated memory address is too far to assemble a jump near to");
+    if (!assemble_jump_near_instruction(jmp_instruction_bytes.data(), remote_target_address, allocated_memory)) {
+        add_log(status, "Allocated memory address is too far to assemble a jump near to", patch_status::LogLevel::ERR);
         return 1;
     }
 
-    add_log(status, "Info: Assembled jump instruction: " + bytes_to_hex_string(jmp_instruction_bytes.data(), jmp_instruction_bytes.size()));
+    add_log(status, "Assembled jump instruction: " + bytes_to_hex_string(jmp_instruction_bytes.data(), jmp_instruction_bytes.size()), patch_status::LogLevel::INFO);
 
     // Write the JMP instruction (plus 1 nop for the left over byte)
     std::array<uint8_t, 6> buffer;
     std::copy(jmp_instruction_bytes.begin(), jmp_instruction_bytes.end(), buffer.begin());
     buffer[5] = 0x90; // NOP instruction
 
-    if (!write_memory_with_protection(h_process, remote_target_address, buffer.data(), buffer.size()))
-    {
-        add_log(status, "Error: Could not write jump instruction and NOP to target address");
+    if (!write_memory_with_protection(h_process, remote_target_address, buffer.data(), buffer.size())) {
+        add_log(status, "Could not write jump instruction and NOP to target address", patch_status::LogLevel::ERR);
         return 1;
     }
-    add_log(status, "Info: Placed hook at USER32.GetWindowDisplayAffinity");
+    add_log(status, "Placed hook at USER32.GetWindowDisplayAffinity", patch_status::LogLevel::SUCCESS);
 
     return 0;
 }
 
-int patch_kernel32_module32_first_w(HANDLE h_process, patch_status& status)
-{
+int patch_kernel32_module32_first_w(HANDLE h_process, patch_status& status) {
     // Get KERNEL32.DLL base address
     uintptr_t module_base_address = get_remote_module_base_address(h_process, L"KERNEL32.DLL");
-    if (!module_base_address)
-    {
-        add_log(status, "Error: Could not get KERNEL32.DLL base address");
+    if (!module_base_address) {
+        add_log(status, "Could not get KERNEL32.DLL base address", patch_status::LogLevel::ERR);
         return 1;
     }
 
-    add_log(status, "Info: Found KERNEL32.DLL base address: 0x" + int_to_hex(module_base_address));
+    add_log(status, "Found KERNEL32.DLL base address: 0x" + int_to_hex(module_base_address), patch_status::LogLevel::INFO);
 
     // Get the address of the target function
     uintptr_t function_address = get_exported_function_address(h_process, module_base_address, L"KERNEL32.DLL", "Module32FirstW");
-    if (!function_address)
-    {
-        add_log(status, "Error: Could not get remote address of Module32FirstW");
+    if (!function_address) {
+        add_log(status, "Could not get remote address of Module32FirstW", patch_status::LogLevel::ERR);
         return 1;
     }
 
-    add_log(status, "Info: Found address of Module32FirstW: 0x" + int_to_hex(function_address));
+    add_log(status, "Found address of Module32FirstW: 0x" + int_to_hex(function_address), patch_status::LogLevel::INFO);
+
+    // Store the address for later undo
+    status.orig_bytes.m32fw_address = function_address;
+
+    // Check if already patched
+    if (is_process_patched(h_process, function_address, status)) {
+        add_log(status, "Module32FirstW already appears to be patched", patch_status::LogLevel::WARNING);
+        return 0; // Consider this a success, it's already patched
+    }
+
+    // Backup original bytes before patching
+    if (!backup_original_bytes(h_process, function_address, status.orig_bytes.module32_first_w_bytes, 7)) {
+        add_log(status, "Failed to backup original bytes before patching", patch_status::LogLevel::ERR);
+        return 1;
+    }
 
     // Allocate memory in the target process
     uintptr_t allocated_memory = allocate_memory_near_address(h_process, function_address, 0x1000);
-    if (!allocated_memory)
-    {
-        add_log(status, "Error: Could not allocate memory near target address");
+    if (!allocated_memory) {
+        add_log(status, "Could not allocate memory near target address", patch_status::LogLevel::ERR);
         return 1;
     }
 
-    add_log(status, "Info: Allocated 1kb of memory at: 0x" + int_to_hex(allocated_memory));
+    add_log(status, "Allocated 1kb of memory at: 0x" + int_to_hex(allocated_memory), patch_status::LogLevel::INFO);
 
     // Place payload at new memory location
     if (!write_memory_with_protection_dynamic(h_process, allocated_memory,
@@ -198,22 +300,21 @@ int patch_kernel32_module32_first_w(HANDLE h_process, patch_status& status)
             0x48, 0x31, 0xC0,   // xor rax, rax
             0xC3                // ret
         })
-        ){
-        add_log(status, "Error: Could not write payload to allocated memory region");
+        ) {
+        add_log(status, "Could not write payload to allocated memory region", patch_status::LogLevel::ERR);
         return 1;
     }
 
-    add_log(status, "Info: Payload written successfully to allocated memory region.");
+    add_log(status, "Payload written successfully to allocated memory region", patch_status::LogLevel::INFO);
 
     // Assemble the JMP instruction
     std::array<uint8_t, 5> jmp_instruction_bytes;
-    if (!assemble_jump_near_instruction(jmp_instruction_bytes.data(), function_address, allocated_memory))
-    {
-        add_log(status, "Error: Allocated memory address is too far to assemble a jump near to");
+    if (!assemble_jump_near_instruction(jmp_instruction_bytes.data(), function_address, allocated_memory)) {
+        add_log(status, "Allocated memory address is too far to assemble a jump near to", patch_status::LogLevel::ERR);
         return 1;
     }
 
-    add_log(status, "Info: Assembled jump instruction: " + bytes_to_hex_string(jmp_instruction_bytes.data(), jmp_instruction_bytes.size()));
+    add_log(status, "Assembled jump instruction: " + bytes_to_hex_string(jmp_instruction_bytes.data(), jmp_instruction_bytes.size()), patch_status::LogLevel::INFO);
 
     // Write the JMP instruction (plus 2 nop's for the left over bytes)
     std::array<uint8_t, 7> buffer;
@@ -221,41 +322,83 @@ int patch_kernel32_module32_first_w(HANDLE h_process, patch_status& status)
     buffer[5] = 0x90; // NOP instruction
     buffer[6] = 0x90; // NOP instruction
 
-    if (!write_memory_with_protection(h_process, function_address, buffer.data(), buffer.size()))
-    {
-        add_log(status, "Error: Could not write jump instruction and NOP to target address");
+    if (!write_memory_with_protection(h_process, function_address, buffer.data(), buffer.size())) {
+        add_log(status, "Could not write jump instruction and NOP to target address", patch_status::LogLevel::ERR);
         return 1;
     }
 
-    add_log(status, "Info: Placed hook at KERNEL32.Module32FirstW");
+    add_log(status, "Placed hook at KERNEL32.Module32FirstW", patch_status::LogLevel::SUCCESS);
 
     return 0;
 }
 
+// Function to undo patches
+bool undo_patches(patch_status& status) {
+    if (!status.undo_available || status.target_process_id == 0) {
+        add_log(status, "No patches available to undo", patch_status::LogLevel::WARNING);
+        return false;
+    }
+
+    HANDLE h_process = OpenProcess(PROCESS_ALL_ACCESS, FALSE, status.target_process_id);
+    if (!h_process) {
+        add_log(status, "Could not open process for undo operation", patch_status::LogLevel::ERR);
+        return false;
+    }
+
+    bool success = true;
+
+    // Restore GetWindowDisplayAffinity
+    if (status.orig_bytes.wda_address != 0 && !status.orig_bytes.window_display_affinity_bytes.empty()) {
+        if (!restore_original_bytes(h_process, status.orig_bytes.wda_address, status.orig_bytes.window_display_affinity_bytes)) {
+            add_log(status, "Failed to restore original bytes for GetWindowDisplayAffinity", patch_status::LogLevel::ERR);
+            success = false;
+        }
+        else {
+            add_log(status, "Successfully restored original bytes for GetWindowDisplayAffinity", patch_status::LogLevel::SUCCESS);
+        }
+    }
+
+    // Restore Module32FirstW
+    if (status.orig_bytes.m32fw_address != 0 && !status.orig_bytes.module32_first_w_bytes.empty()) {
+        if (!restore_original_bytes(h_process, status.orig_bytes.m32fw_address, status.orig_bytes.module32_first_w_bytes)) {
+            add_log(status, "Failed to restore original bytes for Module32FirstW", patch_status::LogLevel::ERR);
+            success = false;
+        }
+        else {
+            add_log(status, "Successfully restored original bytes for Module32FirstW", patch_status::LogLevel::SUCCESS);
+        }
+    }
+
+    CloseHandle(h_process);
+
+    if (success) {
+        status.undo_available = false;
+        status.is_patched = false;
+        add_log(status, "All patches successfully reverted", patch_status::LogLevel::SUCCESS);
+    }
+
+    return success;
+}
+
 // Worker thread function to apply patches
-void patching_thread(patch_status* status)
-{
-    while (status->wait_for_process && status->is_running)
-    {
+void patching_thread(patch_status* status) {
+    while (status->wait_for_process && status->is_running) {
         // Check for nvcontainer.exe process
         std::vector<DWORD> process_ids = get_processes_by_name(L"nvcontainer.exe");
 
-        if (process_ids.empty())
-        {
+        if (process_ids.empty()) {
             std::this_thread::sleep_for(std::chrono::seconds(1));
             continue;
         }
 
         // Filter processes with nvd3dumx.dll loaded
         std::vector<DWORD> filtered_process_ids;
-        for (DWORD process_id : process_ids)
-        {
+        for (DWORD process_id : process_ids) {
             if (is_module_loaded(process_id, L"nvd3dumx.dll"))
                 filtered_process_ids.push_back(process_id);
         }
 
-        if (filtered_process_ids.empty())
-        {
+        if (filtered_process_ids.empty()) {
             std::this_thread::sleep_for(std::chrono::seconds(1));
             continue;
         }
@@ -263,40 +406,39 @@ void patching_thread(patch_status* status)
         // Found the process, no need to wait anymore
         status->wait_for_process = false;
         DWORD nvcontainer_process_id = filtered_process_ids[0];
-        add_log(*status, "Info: Correct process has been found. PID: " + std::to_string(nvcontainer_process_id));
+        status->target_process_id = nvcontainer_process_id;
+        add_log(*status, "Correct process found. PID: " + std::to_string(nvcontainer_process_id), patch_status::LogLevel::SUCCESS);
 
         // Open the process
         HANDLE h_process = OpenProcess(PROCESS_ALL_ACCESS, FALSE, nvcontainer_process_id);
-        if (!h_process)
-        {
-            add_log(*status, "Error: Could not open process");
+        if (!h_process) {
+            add_log(*status, "Could not open process", patch_status::LogLevel::ERR);
             status->is_patched = false;
             break;
         }
 
         // Apply patches
-        add_log(*status, "Starting to apply patches...");
+        add_log(*status, "Starting to apply patches...", patch_status::LogLevel::INFO);
         int error_code = patch_get_window_display_affinity(h_process, *status);
-        if (error_code)
-        {
-            add_log(*status, "Error: Something went wrong while applying the first patch.");
+        if (error_code) {
+            add_log(*status, "Something went wrong while applying the first patch", patch_status::LogLevel::ERR);
             CloseHandle(h_process);
             status->is_patched = false;
             break;
         }
 
         error_code = patch_kernel32_module32_first_w(h_process, *status);
-        if (error_code)
-        {
-            add_log(*status, "Error: Something went wrong while applying the second patch.");
+        if (error_code) {
+            add_log(*status, "Something went wrong while applying the second patch", patch_status::LogLevel::ERR);
             CloseHandle(h_process);
             status->is_patched = false;
             break;
         }
 
         CloseHandle(h_process);
-        add_log(*status, "Success: All patches applied successfully!");
+        add_log(*status, "Patches finished!", patch_status::LogLevel::SUCCESS);
         status->is_patched = true;
+        status->undo_available = true;
 
         // Auto close if requested
         if (status->auto_close)
@@ -304,8 +446,7 @@ void patching_thread(patch_status* status)
     }
 }
 
-void apply_style()
-{
+void apply_style() {
     auto& style = ImGui::GetStyle();
     style.WindowPadding = { 10.f, 10.f };
     style.PopupRounding = 0.f;
@@ -382,12 +523,24 @@ void apply_style()
     colors[ImGuiCol_ModalWindowDimBg] = ImVec4(0.80f, 0.80f, 0.80f, 0.35f);
 }
 
+std::string get_config_path() {
+    char path[MAX_PATH];
+    GetModuleFileNameA(NULL, path, MAX_PATH);
+
+    // Remove the executable name to get the directory
+    std::string dir(path);
+    size_t pos = dir.find_last_of("\\/");
+    std::string exe_dir = (pos != std::string::npos) ? dir.substr(0, pos + 1) : "";
+
+    return exe_dir + "config.ini";
+}
+
 // WinMain - the Windows entry point
 int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPSTR lpCmdLine, int nCmdShow)
 {
     // Load configuration
     Config config;
-    config.Load("config.ini");
+    config.Load(get_config_path().c_str());
 
     patch_status status;
     status.startup_enabled = config.startup_enabled;
@@ -468,21 +621,67 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPSTR lpCmdLine
             ImGuiWindowFlags_NoResize |
             ImGuiWindowFlags_NoMove |
             ImGuiWindowFlags_NoCollapse |
-            ImGuiWindowFlags_NoBringToFrontOnFocus); // Prevent focus behavior changing appearance
+            ImGuiWindowFlags_NoBringToFrontOnFocus);
 
-        ImGui::Text("Status: %s", status.status_message.c_str());
+        // Header with version and status
+        ImGui::Text("NVIDIA Patcher v%s", VERSION);
+        ImGui::SameLine(ImGui::GetWindowWidth() - 235);
+        ImGui::Text(COPYRIGHT_INFO);
         ImGui::Separator();
 
-        // Controls
-        if (ImGui::Button(status.wait_for_process ? "Cancel" : "Close"))
-            status.is_running = false;
+        // Status panel
+        ImGui::BeginChild("StatusPanel", ImVec2(0, 60), true);
+
+        // Display current status with colored indicators
+        ImGui::Text("Status: ");
+        ImGui::SameLine();
+
+        if (status.wait_for_process) {
+            ImGui::TextColored(ImVec4(1.0f, 0.8f, 0.0f, 1.0f), "Waiting for nvcontainer.exe...");
+        }
+        else if (status.is_patched) {
+            ImGui::TextColored(ImVec4(0.0f, 1.0f, 0.0f, 1.0f), "Patches Applied Successfully");
+        }
+        else {
+            ImGui::TextColored(ImVec4(1.0f, 0.0f, 0.0f, 1.0f), status.status_message.c_str());
+        }
+
+        // Process ID information if available
+        if (status.target_process_id != 0) {
+            ImGui::Text("Target Process ID: %u", status.target_process_id);
+        }
+
+        ImGui::EndChild();
+
+        // Controls panel
+        ImGui::BeginChild("ControlsPanel", ImVec2(0, 60), true);
+
+        // Main action buttons
+        if (status.wait_for_process) {
+            if (ImGui::Button("Cancel", ImVec2(100, 30))) {
+                status.is_running = false;
+            }
+        }
+        else {
+            if (ImGui::Button("Close", ImVec2(100, 30))) {
+                status.is_running = false;
+            }
+        }
 
         ImGui::SameLine();
 
+        // Undo patches button - only enabled when patches are applied
+        if (ImGui::Button("Undo Patches", ImVec2(120, 30)) && status.undo_available) {
+            undo_patches(status);
+        }
+
+        ImGui::SameLine();
+
+        // Settings checkboxes
         if (ImGui::Checkbox("Run at Windows startup", &status.startup_enabled))
         {
             config.startup_enabled = status.startup_enabled;
-            config.Save("config.ini");
+            config.Save(get_config_path().c_str());
             set_startup(status.startup_enabled);
         }
 
@@ -491,13 +690,18 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPSTR lpCmdLine
         if (ImGui::Checkbox("Auto-close after patching", &status.auto_close))
         {
             config.auto_close = status.auto_close;
-            config.Save("config.ini");
+            config.Save(get_config_path().c_str());
         }
 
-        // Log display
+        ImGui::EndChild();
+
+        // Log display with title
+        ImGui::Text("Detailed Log:");
         ImGui::BeginChild("LogRegion", ImVec2(0, 0), true, ImGuiWindowFlags_HorizontalScrollbar);
         ImGui::TextUnformatted(status.detailed_log.c_str());
-        if (ImGui::GetScrollY() >= ImGui::GetScrollMaxY())
+
+        // Auto-scroll to keep up with new log entries
+        if (ImGui::GetScrollY() >= ImGui::GetScrollMaxY() - 20)
         {
             ImGui::SetScrollHereY(1.0f);
         }
