@@ -14,12 +14,13 @@
 #include <chrono>
 #include <Windows.h>
 #include <ctime>
+#include <fstream>
 
 #pragma comment(lib, "d3d11.lib")
 
 // Copyright information
-#define COPYRIGHT_INFO "by nloginov, credit furyzenblade"
-#define VERSION "1.1.0"
+#define COPYRIGHT_INFO "Made by nloginov,\nResearch by furyzenblade"
+#define VERSION "1.2.0"
 
 // Forward declarations
 extern IMGUI_IMPL_API LRESULT ImGui_ImplWin32_WndProcHandler(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam);
@@ -39,6 +40,7 @@ struct original_bytes {
     std::vector<uint8_t> module32_first_w_bytes;
     uintptr_t wda_address = 0;
     uintptr_t m32fw_address = 0;
+    DWORD process_id = 0;
 };
 
 // Patch status tracking with improved logging
@@ -48,9 +50,11 @@ struct patch_status {
     bool is_patched = false;
     bool startup_enabled = false;
     bool auto_close = false;
+    bool auto_patch = true;  // New: auto-patch option
     bool undo_available = false;
+    bool manual_patch_requested = false;  // New: manual patch trigger
     DWORD target_process_id = 0;
-    std::string status_message = "Waiting for nvcontainer.exe...";
+    std::string status_message = "Ready - waiting for manual patch or auto-patch...";
     std::string detailed_log;
     original_bytes orig_bytes;
 
@@ -139,6 +143,94 @@ void add_log(patch_status& status, const std::string& message, patch_status::Log
     std::string formatted_message = "[" + timestamp + "] " + prefix + " " + message;
     status.detailed_log += formatted_message + "\n";
     status.status_message = message;
+}
+
+// Save patch info to file for persistence
+void save_patch_info(const original_bytes& orig_bytes, const std::string& config_path) {
+    std::string patch_info_path = config_path.substr(0, config_path.find_last_of('.')) + "_patches.dat";
+    std::ofstream file(patch_info_path, std::ios::binary);
+
+    if (!file.is_open()) return;
+
+    // Write process ID
+    file.write(reinterpret_cast<const char*>(&orig_bytes.process_id), sizeof(orig_bytes.process_id));
+
+    // Write addresses
+    file.write(reinterpret_cast<const char*>(&orig_bytes.wda_address), sizeof(orig_bytes.wda_address));
+    file.write(reinterpret_cast<const char*>(&orig_bytes.m32fw_address), sizeof(orig_bytes.m32fw_address));
+
+    // Write window_display_affinity_bytes
+    size_t wda_size = orig_bytes.window_display_affinity_bytes.size();
+    file.write(reinterpret_cast<const char*>(&wda_size), sizeof(wda_size));
+    if (wda_size > 0) {
+        file.write(reinterpret_cast<const char*>(orig_bytes.window_display_affinity_bytes.data()), wda_size);
+    }
+
+    // Write module32_first_w_bytes
+    size_t m32fw_size = orig_bytes.module32_first_w_bytes.size();
+    file.write(reinterpret_cast<const char*>(&m32fw_size), sizeof(m32fw_size));
+    if (m32fw_size > 0) {
+        file.write(reinterpret_cast<const char*>(orig_bytes.module32_first_w_bytes.data()), m32fw_size);
+    }
+
+    file.close();
+}
+
+// Load patch info from file
+bool load_patch_info(original_bytes& orig_bytes, const std::string& config_path) {
+    std::string patch_info_path = config_path.substr(0, config_path.find_last_of('.')) + "_patches.dat";
+    std::ifstream file(patch_info_path, std::ios::binary);
+
+    if (!file.is_open()) return false;
+
+    try {
+        // Read process ID
+        file.read(reinterpret_cast<char*>(&orig_bytes.process_id), sizeof(orig_bytes.process_id));
+
+        // Read addresses
+        file.read(reinterpret_cast<char*>(&orig_bytes.wda_address), sizeof(orig_bytes.wda_address));
+        file.read(reinterpret_cast<char*>(&orig_bytes.m32fw_address), sizeof(orig_bytes.m32fw_address));
+
+        // Read window_display_affinity_bytes
+        size_t wda_size;
+        file.read(reinterpret_cast<char*>(&wda_size), sizeof(wda_size));
+        if (wda_size > 0 && wda_size < 1024) { // Sanity check
+            orig_bytes.window_display_affinity_bytes.resize(wda_size);
+            file.read(reinterpret_cast<char*>(orig_bytes.window_display_affinity_bytes.data()), wda_size);
+        }
+
+        // Read module32_first_w_bytes
+        size_t m32fw_size;
+        file.read(reinterpret_cast<char*>(&m32fw_size), sizeof(m32fw_size));
+        if (m32fw_size > 0 && m32fw_size < 1024) { // Sanity check
+            orig_bytes.module32_first_w_bytes.resize(m32fw_size);
+            file.read(reinterpret_cast<char*>(orig_bytes.module32_first_w_bytes.data()), m32fw_size);
+        }
+
+        file.close();
+        return true;
+    }
+    catch (...) {
+        file.close();
+        return false;
+    }
+}
+
+// Delete patch info file
+void delete_patch_info(const std::string& config_path) {
+    std::string patch_info_path = config_path.substr(0, config_path.find_last_of('.')) + "_patches.dat";
+    DeleteFileA(patch_info_path.c_str());
+}
+
+// Check if process is still running
+bool is_process_running(DWORD process_id) {
+    HANDLE h_process = OpenProcess(PROCESS_QUERY_INFORMATION, FALSE, process_id);
+    if (!h_process) return false;
+
+    DWORD exit_code;
+    bool running = GetExitCodeProcess(h_process, &exit_code) && exit_code == STILL_ACTIVE;
+    CloseHandle(h_process);
+    return running;
 }
 
 // Function to check if a process has already been patched
@@ -333,13 +425,25 @@ int patch_kernel32_module32_first_w(HANDLE h_process, patch_status& status) {
 }
 
 // Function to undo patches
-bool undo_patches(patch_status& status) {
-    if (!status.undo_available || status.target_process_id == 0) {
-        add_log(status, "No patches available to undo", patch_status::LogLevel::WARNING);
+bool undo_patches(patch_status& status, const std::string& config_path) {
+    // Try to load patch info if not available in memory
+    if (!status.undo_available && status.orig_bytes.process_id == 0) {
+        if (!load_patch_info(status.orig_bytes, config_path)) {
+            add_log(status, "No patch information available to undo", patch_status::LogLevel::WARNING);
+            return false;
+        }
+    }
+
+    // Check if the original process is still running
+    if (!is_process_running(status.orig_bytes.process_id)) {
+        add_log(status, "Original patched process is no longer running", patch_status::LogLevel::WARNING);
+        // Clean up the patch info file since the process is gone
+        delete_patch_info(config_path);
+        status.undo_available = false;
         return false;
     }
 
-    HANDLE h_process = OpenProcess(PROCESS_ALL_ACCESS, FALSE, status.target_process_id);
+    HANDLE h_process = OpenProcess(PROCESS_ALL_ACCESS, FALSE, status.orig_bytes.process_id);
     if (!h_process) {
         add_log(status, "Could not open process for undo operation", patch_status::LogLevel::ERR);
         return false;
@@ -374,6 +478,7 @@ bool undo_patches(patch_status& status) {
     if (success) {
         status.undo_available = false;
         status.is_patched = false;
+        delete_patch_info(config_path);
         add_log(status, "All patches successfully reverted", patch_status::LogLevel::SUCCESS);
     }
 
@@ -381,75 +486,109 @@ bool undo_patches(patch_status& status) {
 }
 
 // Worker thread function to apply patches
-void patching_thread(patch_status* status) {
-    while (status->wait_for_process && status->is_running) {
-        // Check for nvcontainer.exe process
-        std::vector<DWORD> process_ids = get_processes_by_name(L"nvcontainer.exe");
-
-        if (process_ids.empty()) {
-            std::this_thread::sleep_for(std::chrono::seconds(1));
+void patching_thread(patch_status* status, const std::string& config_path) {
+    while (status->is_running) {
+        // Only proceed if auto-patch is enabled or manual patch was requested
+        if (!status->auto_patch && !status->manual_patch_requested) {
+            std::this_thread::sleep_for(std::chrono::milliseconds(100));
             continue;
         }
 
-        // Filter processes with nvd3dumx.dll loaded
-        std::vector<DWORD> filtered_process_ids;
-        for (DWORD process_id : process_ids) {
-            if (is_module_loaded(process_id, L"nvd3dumx.dll"))
-                filtered_process_ids.push_back(process_id);
-        }
+        if (status->wait_for_process) {
+            // Check for nvcontainer.exe process
+            std::vector<DWORD> process_ids = get_processes_by_name(L"nvcontainer.exe");
 
-        if (filtered_process_ids.empty()) {
-            std::this_thread::sleep_for(std::chrono::seconds(1));
-            continue;
-        }
+            if (process_ids.empty()) {
+                if (status->auto_patch) {
+                    status->status_message = "Waiting for nvcontainer.exe...";
+                }
+                else {
+                    status->status_message = "Ready - nvcontainer.exe not found";
+                }
+                std::this_thread::sleep_for(std::chrono::seconds(1));
+                continue;
+            }
 
-        // Found the process, no need to wait anymore
-        status->wait_for_process = false;
-        DWORD nvcontainer_process_id = filtered_process_ids[0];
-        status->target_process_id = nvcontainer_process_id;
-        add_log(*status, "Correct process found. PID: " + std::to_string(nvcontainer_process_id), patch_status::LogLevel::SUCCESS);
+            // Filter processes with nvd3dumx.dll loaded
+            std::vector<DWORD> filtered_process_ids;
+            for (DWORD process_id : process_ids) {
+                if (is_module_loaded(process_id, L"nvd3dumx.dll"))
+                    filtered_process_ids.push_back(process_id);
+            }
 
-        // Open the process
-        HANDLE h_process = OpenProcess(PROCESS_ALL_ACCESS, FALSE, nvcontainer_process_id);
-        if (!h_process) {
-            add_log(*status, "Could not open process", patch_status::LogLevel::ERR);
-            status->is_patched = false;
-            break;
-        }
+            if (filtered_process_ids.empty()) {
+                if (status->auto_patch) {
+                    status->status_message = "Waiting for nvcontainer.exe with nvd3dumx.dll...";
+                }
+                else {
+                    status->status_message = "Ready - nvcontainer.exe found but nvd3dumx.dll not loaded";
+                }
+                std::this_thread::sleep_for(std::chrono::seconds(1));
+                continue;
+            }
 
-        // Apply patches
-        add_log(*status, "Starting to apply patches...", patch_status::LogLevel::INFO);
-        int error_code = patch_get_window_display_affinity(h_process, *status);
-        if (error_code) {
-            add_log(*status, "Something went wrong while applying the first patch", patch_status::LogLevel::ERR);
+            // Found the process
+            status->wait_for_process = false;
+            DWORD nvcontainer_process_id = filtered_process_ids[0];
+            status->target_process_id = nvcontainer_process_id;
+            status->orig_bytes.process_id = nvcontainer_process_id;
+            add_log(*status, "Correct process found. PID: " + std::to_string(nvcontainer_process_id), patch_status::LogLevel::SUCCESS);
+
+            // Open the process
+            HANDLE h_process = OpenProcess(PROCESS_ALL_ACCESS, FALSE, nvcontainer_process_id);
+            if (!h_process) {
+                add_log(*status, "Could not open process", patch_status::LogLevel::ERR);
+                status->is_patched = false;
+                status->wait_for_process = true;
+                status->manual_patch_requested = false;
+                continue;
+            }
+
+            // Apply patches
+            add_log(*status, "Starting to apply patches...", patch_status::LogLevel::INFO);
+            int error_code = patch_get_window_display_affinity(h_process, *status);
+            if (error_code) {
+                add_log(*status, "Something went wrong while applying the first patch", patch_status::LogLevel::ERR);
+                CloseHandle(h_process);
+                status->is_patched = false;
+                status->wait_for_process = true;
+                status->manual_patch_requested = false;
+                continue;
+            }
+
+            error_code = patch_kernel32_module32_first_w(h_process, *status);
+            if (error_code) {
+                add_log(*status, "Something went wrong while applying the second patch", patch_status::LogLevel::ERR);
+                CloseHandle(h_process);
+                status->is_patched = false;
+                status->wait_for_process = true;
+                status->manual_patch_requested = false;
+                continue;
+            }
+
             CloseHandle(h_process);
-            status->is_patched = false;
-            break;
+
+            // Save patch information for persistence
+            save_patch_info(status->orig_bytes, config_path);
+
+            add_log(*status, "Patches finished!", patch_status::LogLevel::SUCCESS);
+            status->is_patched = true;
+            status->undo_available = true;
+            status->manual_patch_requested = false;
+
+            // Auto close if requested
+            if (status->auto_close)
+                status->is_running = false;
         }
 
-        error_code = patch_kernel32_module32_first_w(h_process, *status);
-        if (error_code) {
-            add_log(*status, "Something went wrong while applying the second patch", patch_status::LogLevel::ERR);
-            CloseHandle(h_process);
-            status->is_patched = false;
-            break;
-        }
-
-        CloseHandle(h_process);
-        add_log(*status, "Patches finished!", patch_status::LogLevel::SUCCESS);
-        status->is_patched = true;
-        status->undo_available = true;
-
-        // Auto close if requested
-        if (status->auto_close)
-            status->is_running = false;
+        std::this_thread::sleep_for(std::chrono::milliseconds(100));
     }
 }
 
 void apply_style() {
     auto& style = ImGui::GetStyle();
     style.WindowPadding = { 10.f, 10.f };
-    style.PopupRounding = 0.f;
+    style.PopupRounding = 3.f;
     style.FramePadding = { 8.f, 4.f };
     style.ItemSpacing = { 10.f, 8.f };
     style.ItemInnerSpacing = { 6.f, 6.f };
@@ -462,12 +601,12 @@ void apply_style() {
     style.PopupBorderSize = 1.f;
     style.FrameBorderSize = 0.f;
     style.TabBorderSize = 0.f;
-    style.WindowRounding = 0.f;
-    style.ChildRounding = 0.f;
-    style.FrameRounding = 0.f;
-    style.ScrollbarRounding = 0.f;
-    style.GrabRounding = 0.f;
-    style.TabRounding = 0.f;
+    style.WindowRounding = 3.f;
+    style.ChildRounding = 3.f;
+    style.FrameRounding = 3.f;
+    style.ScrollbarRounding = 3.f;
+    style.GrabRounding = 3.f;
+    style.TabRounding = 3.f;
     style.WindowTitleAlign = { 0.5f, 0.5f };
     style.ButtonTextAlign = { 0.5f, 0.5f };
     style.DisplaySafeAreaPadding = { 3.f, 3.f };
@@ -540,16 +679,32 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPSTR lpCmdLine
 {
     // Load configuration
     Config config;
-    config.Load(get_config_path().c_str());
+    std::string config_path = get_config_path();
+    config.Load(config_path.c_str());
 
     patch_status status;
     status.startup_enabled = config.startup_enabled;
     status.auto_close = config.auto_close;
+    status.auto_patch = config.auto_patch;
+
+    // Check for existing patch info
+    if (load_patch_info(status.orig_bytes, config_path)) {
+        if (is_process_running(status.orig_bytes.process_id)) {
+            status.undo_available = true;
+            status.is_patched = true;
+            status.target_process_id = status.orig_bytes.process_id;
+            add_log(status, "Found existing patch information for process ID: " + std::to_string(status.orig_bytes.process_id), patch_status::LogLevel::INFO);
+        }
+        else {
+            delete_patch_info(config_path);
+            add_log(status, "Found stale patch information - process no longer running", patch_status::LogLevel::WARNING);
+        }
+    }
 
     if (config.no_gui)
     {
         // Non-GUI mode (if still needed for debugging)
-        patching_thread(&status);
+        patching_thread(&status, config_path);
         return 0;
     }
 
@@ -557,7 +712,7 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPSTR lpCmdLine
     WNDCLASSEX wc = { sizeof(WNDCLASSEX), CS_CLASSDC, wnd_proc, 0L, 0L, hInstance, NULL, NULL, NULL, NULL, _T("NVIDIA Patcher"), NULL };
     RegisterClassEx(&wc);
     HWND hwnd = CreateWindow(wc.lpszClassName, _T("NVIDIA Patcher"),
-        WS_POPUP | WS_VISIBLE, // WS_POPUP for borderless
+        WS_OVERLAPPEDWINDOW, // Now resizable and movable
         100, 100, 700, 500, NULL, NULL, wc.hInstance, NULL);
 
     // Initialize Direct3D
@@ -575,6 +730,7 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPSTR lpCmdLine
     // Setup ImGui context
     ImGui::CreateContext();
     ImGuiIO& io = ImGui::GetIO(); (void)io;
+    io.ConfigFlags |= ImGuiConfigFlags_NavEnableKeyboard; // Enable keyboard controls
 
     // Setup style
     apply_style();
@@ -595,7 +751,7 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPSTR lpCmdLine
     io.FontDefault = main_font;
 
     // Start patching thread
-    std::thread worker_thread(patching_thread, &status);
+    std::thread worker_thread(patching_thread, &status, config_path);
 
     // Main loop
     MSG msg;
@@ -616,8 +772,9 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPSTR lpCmdLine
 
         // UI Layout
         ImGui::SetNextWindowPos(ImVec2(0, 0));
-        ImGui::SetNextWindowSize(ImVec2(700, 500));
+        ImGui::SetNextWindowSize(io.DisplaySize);
         ImGui::Begin("NVIDIA Patcher", &status.is_running,
+            ImGuiWindowFlags_NoTitleBar |
             ImGuiWindowFlags_NoResize |
             ImGuiWindowFlags_NoMove |
             ImGuiWindowFlags_NoCollapse |
@@ -625,8 +782,18 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPSTR lpCmdLine
 
         // Header with version and status
         ImGui::Text("NVIDIA Patcher v%s", VERSION);
-        ImGui::SameLine(ImGui::GetWindowWidth() - 235);
-        ImGui::Text(COPYRIGHT_INFO);
+
+        // Copyright tooltip indicator
+        ImGui::SameLine(ImGui::GetWindowWidth() - 25); // Right-align
+        ImGui::TextColored(ImVec4(0.6f, 0.6f, 0.6f, 0.7f), "(?)");
+        if (ImGui::IsItemHovered()) {
+            ImGui::BeginTooltip();
+            ImGui::PushTextWrapPos(ImGui::GetFontSize() * 25.0f); // Nice text wrapping
+            ImGui::TextUnformatted(COPYRIGHT_INFO);
+            ImGui::PopTextWrapPos();
+            ImGui::EndTooltip();
+        }
+
         ImGui::Separator();
 
         // Status panel
@@ -636,53 +803,58 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPSTR lpCmdLine
         ImGui::Text("Status: ");
         ImGui::SameLine();
 
-        if (status.wait_for_process) {
-            ImGui::TextColored(ImVec4(1.0f, 0.8f, 0.0f, 1.0f), "Waiting for nvcontainer.exe...");
+        // Main status message (top section)
+        if (status.is_patched) {
+            ImGui::TextColored(ImVec4(0.0f, 1.0f, 0.0f, 1.0f), "Patched Successfully");
         }
-        else if (status.is_patched) {
-            ImGui::TextColored(ImVec4(0.0f, 1.0f, 0.0f, 1.0f), "Patches Applied Successfully");
+        else if (status.manual_patch_requested) {
+            ImGui::TextColored(ImVec4(0.0f, 0.75f, 1.0f, 1.0f), "Patching...");
+        }
+        else if (status.wait_for_process) {
+            ImGui::TextColored(ImVec4(1.0f, 0.65f, 0.1f, 1.0f),
+                status.auto_patch ? "Waiting for NVIDIA process..." : "Ready to patch");
         }
         else {
             ImGui::TextColored(ImVec4(1.0f, 0.0f, 0.0f, 1.0f), status.status_message.c_str());
         }
 
-        // Process ID information if available
+        // Process status section (more technical details)
+        ImGui::Text("Process: ");
+        ImGui::SameLine();
         if (status.target_process_id != 0) {
-            ImGui::Text("Target Process ID: %u", status.target_process_id);
+            ImGui::TextColored(ImVec4(0.0f, 1.0f, 0.0f, 1.0f), "Attached to PID: %u", status.target_process_id);
+        }
+        else {
+            // Only show additional status if not covered by main status
+            if (!status.manual_patch_requested && !status.wait_for_process) {
+                ImGui::TextColored(ImVec4(0.7f, 0.7f, 0.7f, 1.0f), "Not connected");
+            }
+
+            // Add tooltip with more details
+            if (ImGui::IsItemHovered()) {
+                ImGui::BeginTooltip();
+                if (status.manual_patch_requested) {
+                    ImGui::Text("Searching for NVIDIA container...");
+                }
+                else if (status.wait_for_process && status.auto_patch) {
+                    ImGui::Text("Automatically scanning for process");
+                }
+                else {
+                    ImGui::Text("Press 'Patch Now' to begin");
+                }
+                ImGui::EndTooltip();
+            }
         }
 
         ImGui::EndChild();
 
-        // Controls panel
-        ImGui::BeginChild("ControlsPanel", ImVec2(0, 60), true);
-
-        // Main action buttons
-        if (status.wait_for_process) {
-            if (ImGui::Button("Cancel", ImVec2(100, 30))) {
-                status.is_running = false;
-            }
-        }
-        else {
-            if (ImGui::Button("Close", ImVec2(100, 30))) {
-                status.is_running = false;
-            }
-        }
-
-        ImGui::SameLine();
-
-        // Undo patches button - only enabled when patches are applied
-        if (ImGui::Button("Undo Patches", ImVec2(120, 30)) && status.undo_available) {
-            undo_patches(status);
-        }
-
-        ImGui::SameLine();
-
         // Settings checkboxes
-        if (ImGui::Checkbox("Run at Windows startup", &status.startup_enabled))
+        ImGui::BeginChild("ControlsPanel", ImVec2(0, 80), true);
+
+        if (ImGui::Checkbox("Auto-patch on launch", &status.auto_patch))
         {
-            config.startup_enabled = status.startup_enabled;
-            config.Save(get_config_path().c_str());
-            set_startup(status.startup_enabled);
+            config.auto_patch = status.auto_patch;
+            config.Save(config_path.c_str());
         }
 
         ImGui::SameLine();
@@ -690,21 +862,64 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPSTR lpCmdLine
         if (ImGui::Checkbox("Auto-close after patching", &status.auto_close))
         {
             config.auto_close = status.auto_close;
-            config.Save(get_config_path().c_str());
+            config.Save(config_path.c_str());
+        }
+
+        ImGui::SameLine();
+        // Settings checkboxes
+        if (ImGui::Checkbox("Run at Windows startup", &status.startup_enabled))
+        {
+            config.startup_enabled = status.startup_enabled;
+            config.Save(config_path.c_str());
+            set_startup(status.startup_enabled);
+        }
+
+        // Main action buttons
+        if (ImGui::Button("Patch Now", ImVec2(100, 30)) && !status.is_patched) {
+            status.manual_patch_requested = true;
+            status.wait_for_process = true;
+            add_log(status, "Manual patch requested", patch_status::LogLevel::INFO);
+        }
+
+        ImGui::SameLine();
+
+        // Only show Undo button if there are patches to undo
+        if (status.undo_available || status.is_patched) {
+            if (ImGui::Button("Undo Patches", ImVec2(120, 30))) {
+                undo_patches(status, config_path);
+            }
+            ImGui::SameLine();
+        }
+
+        if (ImGui::Button("Close", ImVec2(100, 30))) {
+            status.is_running = false;
         }
 
         ImGui::EndChild();
 
         // Log display with title
         ImGui::Text("Detailed Log:");
-        ImGui::BeginChild("LogRegion", ImVec2(0, 0), true, ImGuiWindowFlags_HorizontalScrollbar);
-        ImGui::TextUnformatted(status.detailed_log.c_str());
+        ImGui::BeginChild("LogRegion", ImVec2(0, 0), true,
+            ImGuiWindowFlags_HorizontalScrollbar |
+            ImGuiWindowFlags_AlwaysVerticalScrollbar);
+
+        // Display placeholder when empty
+        if (status.detailed_log.empty()) {
+            ImGui::Text("Log is empty - patch activity will appear here");
+        }
+        else {
+            // Display log text
+            ImGui::PushTextWrapPos(0.0f); // Enable text wrapping
+            ImGui::TextUnformatted(status.detailed_log.c_str());
+            ImGui::PopTextWrapPos();
+        }
 
         // Auto-scroll to keep up with new log entries
         if (ImGui::GetScrollY() >= ImGui::GetScrollMaxY() - 20)
         {
             ImGui::SetScrollHereY(1.0f);
         }
+
         ImGui::EndChild();
 
         ImGui::End();
