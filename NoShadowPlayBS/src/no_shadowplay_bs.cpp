@@ -15,12 +15,15 @@
 #include <Windows.h>
 #include <ctime>
 #include <fstream>
+#include <dwmapi.h>
 
 #pragma comment(lib, "d3d11.lib")
+#pragma comment(lib, "dwmapi.lib")
+#define IDI_ICON1 101
 
 // Copyright information
 #define COPYRIGHT_INFO "Made by nloginov,\nResearch by furyzenblade"
-#define VERSION "1.2.0"
+#define VERSION "1.2.1"
 
 // Forward declarations
 extern IMGUI_IMPL_API LRESULT ImGui_ImplWin32_WndProcHandler(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam);
@@ -80,7 +83,7 @@ bool set_startup(bool enable) {
 
     if (enable) {
         std::string command = std::string(exe_path);
-        RegSetValueExA(h_key, "NvPatcher", 0, REG_SZ, (BYTE*)command.c_str(), command.length() + 1);
+        RegSetValueExA(h_key, "NvPatcher", 0, REG_SZ, (BYTE*)command.c_str(), static_cast<DWORD>(command.length() + 1));
     }
     else
         RegDeleteValueA(h_key, "NvPatcher");
@@ -105,6 +108,22 @@ bool is_startup_enabled() {
     RegCloseKey(h_key);
 
     return exists;
+}
+
+// Function to enable dark titlebar
+void enable_dark_titlebar(HWND hwnd) {
+    BOOL dark_mode = TRUE;
+    DwmSetWindowAttribute(hwnd, DWMWA_USE_IMMERSIVE_DARK_MODE, &dark_mode, sizeof(dark_mode)); // For Windows 10 version 1809 and later
+
+    // Alternative for older Windows 10 versions (before 1809)
+    // DwmSetWindowAttribute(hwnd, 19, &dark_mode, sizeof(dark_mode));
+
+    // Enable blur behind for transparency effect
+    DWM_BLURBEHIND bb = {};
+    bb.dwFlags = DWM_BB_ENABLE | DWM_BB_BLURREGION;
+    bb.fEnable = TRUE;
+    bb.hRgnBlur = NULL; // NULL means entire window
+    DwmEnableBlurBehindWindow(hwnd, &bb);
 }
 
 // Get current timestamp for logs
@@ -709,11 +728,30 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPSTR lpCmdLine
     }
 
     // Initialize window
-    WNDCLASSEX wc = { sizeof(WNDCLASSEX), CS_CLASSDC, wnd_proc, 0L, 0L, hInstance, NULL, NULL, NULL, NULL, _T("NVIDIA Patcher"), NULL };
+    WNDCLASSEX wc = {
+        sizeof(WNDCLASSEX),
+        CS_CLASSDC,
+        wnd_proc,
+        0L,
+        0L,
+        hInstance,
+        LoadIcon(hInstance, MAKEINTRESOURCE(IDI_ICON1)), // Main icon
+        LoadCursor(NULL, IDC_ARROW),
+        (HBRUSH)(COLOR_WINDOW + 1),
+        NULL,
+        _T("NVIDIA Patcher"),
+        LoadIcon(hInstance, MAKEINTRESOURCE(IDI_ICON1)) // Small icon
+    };
+
     RegisterClassEx(&wc);
     HWND hwnd = CreateWindow(wc.lpszClassName, _T("NVIDIA Patcher"),
         WS_OVERLAPPEDWINDOW, // Now resizable and movable
         100, 100, 700, 500, NULL, NULL, wc.hInstance, NULL);
+
+    LoadIcon(hInstance, MAKEINTRESOURCE(IDI_ICON1));
+
+    // Apply dark theme BEFORE showing the window
+    enable_dark_titlebar(hwnd);
 
     // Initialize Direct3D
     if (!create_device_d3d(hwnd, &g_device, &g_device_context, &g_swap_chain))
