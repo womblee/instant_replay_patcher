@@ -2,9 +2,9 @@
 
 A lightweight tool that enables NVIDIA Shadowplay to record content normally flagged as "restricted" by bypassing NVIDIA's content detection mechanisms.
 
-![image](https://github.com/user-attachments/assets/5c160d00-025e-44af-924a-5dac40a00e9e)
+![image](https://github.com/user-attachments/assets/1ab41da7-0ef1-4158-b122-857159cca709)
 
-![image](https://github.com/user-attachments/assets/d2d18848-7e59-485c-a486-73055984d193)
+![image](https://github.com/user-attachments/assets/a75dae0b-321e-41c7-bc0f-f47d9f805711)
 
 ## Key Features
 - **Automatic Detection**: Monitors and automatically patches the NVIDIA Container process (nvcontainer.exe)
