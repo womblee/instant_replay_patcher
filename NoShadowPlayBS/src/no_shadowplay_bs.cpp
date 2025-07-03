@@ -904,7 +904,7 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPSTR lpCmdLine
         }
 
         ImGui::SameLine();
-        // Settings checkboxes
+        
         if (ImGui::Checkbox("Run at Windows startup", &status.startup_enabled))
         {
             config.startup_enabled = status.startup_enabled;
