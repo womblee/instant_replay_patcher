@@ -23,7 +23,7 @@
 
 // Copyright information
 #define COPYRIGHT_INFO "Made by nloginov,\nResearch by furyzenblade"
-#define VERSION "1.2.1"
+#define VERSION "1.2.2"
 
 // Forward declarations
 extern IMGUI_IMPL_API LRESULT ImGui_ImplWin32_WndProcHandler(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam);
@@ -681,24 +681,44 @@ void apply_style() {
     colors[ImGuiCol_ModalWindowDimBg] = ImVec4(0.80f, 0.80f, 0.80f, 0.35f);
 }
 
+
 std::string get_config_path() {
     char path[MAX_PATH];
-    GetModuleFileNameA(NULL, path, MAX_PATH);
 
-    // Remove the executable name to get the directory
-    std::string dir(path);
-    size_t pos = dir.find_last_of("\\/");
-    std::string exe_dir = (pos != std::string::npos) ? dir.substr(0, pos + 1) : "";
+    // Get the AppData\Roaming folder path
+    if (GetEnvironmentVariableA("APPDATA", path, MAX_PATH) == 0) {
+        // Fallback to current directory if APPDATA is not available
+        GetModuleFileNameA(NULL, path, MAX_PATH);
+        std::string dir(path);
+        size_t pos = dir.find_last_of("\\/");
+        std::string exe_dir = (pos != std::string::npos) ? dir.substr(0, pos + 1) : "";
+        return exe_dir + "config.ini";
+    }
 
-    return exe_dir + "config.ini";
+    std::string appdata_path(path);
+
+    // Ensure path ends with backslash
+    if (!appdata_path.empty() && appdata_path.back() != '\\') {
+        appdata_path += "\\";
+    }
+
+    // Create a subdirectory
+    appdata_path += "NoShadowPlayBS\\";
+    CreateDirectoryA(appdata_path.c_str(), NULL);
+
+    return appdata_path + "config.ini";
 }
 
 // WinMain - the Windows entry point
 int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPSTR lpCmdLine, int nCmdShow)
 {
+    // Path
+    std::string config_path = get_config_path();
+    size_t pos = config_path.find_last_of("\\/");
+    std::string config_dir = (pos != std::string::npos) ? config_path.substr(0, pos + 1) : "";
+
     // Load configuration
     Config config;
-    std::string config_path = get_config_path();
     config.Load(config_path.c_str());
 
     patch_status status;
@@ -769,6 +789,10 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPSTR lpCmdLine
     ImGui::CreateContext();
     ImGuiIO& io = ImGui::GetIO(); (void)io;
     io.ConfigFlags |= ImGuiConfigFlags_NavEnableKeyboard; // Enable keyboard controls
+
+    // Write the imgui.ini to the program's directory
+    std::string imgui_path = config_dir + "imgui.ini";
+    io.IniFilename = config_path.c_str(); 
 
     // Setup style
     apply_style();
