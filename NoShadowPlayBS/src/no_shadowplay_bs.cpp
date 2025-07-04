@@ -792,7 +792,7 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPSTR lpCmdLine
 
     // Write the imgui.ini to the program's directory
     std::string imgui_path = config_dir + "imgui.ini";
-    io.IniFilename = config_path.c_str(); 
+    io.IniFilename = imgui_path.c_str();
 
     // Setup style
     apply_style();
