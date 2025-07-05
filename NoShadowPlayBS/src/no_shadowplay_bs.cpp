@@ -23,7 +23,7 @@
 
 // Copyright information
 #define COPYRIGHT_INFO "Made by nloginov,\nResearch by furyzenblade"
-#define VERSION "1.3.2"
+#define VERSION "1.3.3"
 
 // Forward declarations
 extern IMGUI_IMPL_API LRESULT ImGui_ImplWin32_WndProcHandler(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam);
@@ -46,7 +46,7 @@ struct original_bytes {
     std::vector<uint8_t> module32_next_w_bytes;
     std::vector<uint8_t> enum_windows_bytes;
     std::vector<uint8_t> get_window_info_bytes;
-    std::vector<uint8_t> open_process_bytes;
+    std::vector<uint8_t> enum_modules_bytes;
 
     uintptr_t wda_address = 0;
     uintptr_t process32_first_w_address = 0;
@@ -55,7 +55,7 @@ struct original_bytes {
     uintptr_t module32_next_w_address = 0;
     uintptr_t enum_windows_address = 0;
     uintptr_t get_window_info_address = 0;
-    uintptr_t open_process_address = 0;
+    uintptr_t enum_modules_address = 0;
 
     DWORD process_id = 0;
 };
@@ -221,7 +221,7 @@ void save_patch_info(const original_bytes& orig_bytes, const std::string& config
     file.write(reinterpret_cast<const char*>(&orig_bytes.module32_next_w_address), sizeof(orig_bytes.module32_next_w_address));
     file.write(reinterpret_cast<const char*>(&orig_bytes.enum_windows_address), sizeof(orig_bytes.enum_windows_address));
     file.write(reinterpret_cast<const char*>(&orig_bytes.get_window_info_address), sizeof(orig_bytes.get_window_info_address));
-    file.write(reinterpret_cast<const char*>(&orig_bytes.open_process_address), sizeof(orig_bytes.open_process_address));
+    file.write(reinterpret_cast<const char*>(&orig_bytes.enum_modules_address), sizeof(orig_bytes.enum_modules_address));
 
     // Helper lambda to write byte vectors
     auto write_bytes = [&file](const std::vector<uint8_t>& bytes) {
@@ -240,7 +240,7 @@ void save_patch_info(const original_bytes& orig_bytes, const std::string& config
     write_bytes(orig_bytes.module32_next_w_bytes);
     write_bytes(orig_bytes.enum_windows_bytes);
     write_bytes(orig_bytes.get_window_info_bytes);
-    write_bytes(orig_bytes.open_process_bytes);
+    write_bytes(orig_bytes.enum_modules_bytes);
 
     file.close();
 }
@@ -264,7 +264,7 @@ bool load_patch_info(original_bytes& orig_bytes, const std::string& config_path)
         file.read(reinterpret_cast<char*>(&orig_bytes.module32_next_w_address), sizeof(orig_bytes.module32_next_w_address));
         file.read(reinterpret_cast<char*>(&orig_bytes.enum_windows_address), sizeof(orig_bytes.enum_windows_address));
         file.read(reinterpret_cast<char*>(&orig_bytes.get_window_info_address), sizeof(orig_bytes.get_window_info_address));
-        file.read(reinterpret_cast<char*>(&orig_bytes.open_process_address), sizeof(orig_bytes.open_process_address));
+        file.read(reinterpret_cast<char*>(&orig_bytes.enum_modules_address), sizeof(orig_bytes.enum_modules_address));
 
         // Helper lambda to read byte vectors
         auto read_bytes = [&file](std::vector<uint8_t>& bytes) {
@@ -284,7 +284,7 @@ bool load_patch_info(original_bytes& orig_bytes, const std::string& config_path)
         read_bytes(orig_bytes.module32_next_w_bytes);
         read_bytes(orig_bytes.enum_windows_bytes);
         read_bytes(orig_bytes.get_window_info_bytes);
-        read_bytes(orig_bytes.open_process_bytes);
+        read_bytes(orig_bytes.enum_modules_bytes);
 
         file.close();
         return true;
@@ -898,7 +898,7 @@ int patch_user32_get_window_info(HANDLE h_process, patch_status& status) {
     return 0;
 }
 
-int patch_open_process(HANDLE h_process, patch_status& status) {
+int patch_k32_enum_process_modules(HANDLE h_process, patch_status& status) {
     // Get KERNEL32.dll base address
     uintptr_t remote_kernel32_base = get_remote_module_base_address(h_process, L"KERNEL32.dll");
     if (!remote_kernel32_base) {
@@ -906,59 +906,41 @@ int patch_open_process(HANDLE h_process, patch_status& status) {
         return 1;
     }
 
-    // Get the address of OpenProcess
-    uintptr_t remote_target_address = get_exported_function_address(h_process, remote_kernel32_base, L"KERNEL32.dll", "OpenProcess");
+    uintptr_t remote_target_address = get_exported_function_address(h_process, remote_kernel32_base, L"KERNEL32.dll", "K32EnumProcessModules");
     if (!remote_target_address) {
-        add_log(status, "Could not get remote address of OpenProcess", patch_status::LogLevel::ERR);
+        add_log(status, "Could not get remote address of K32EnumProcessModules", patch_status::LogLevel::ERR);
         return 1;
     }
 
-    add_log(status, "Found address of OpenProcess: 0x" + int_to_hex(remote_target_address), patch_status::LogLevel::INFO);
-
-    // Store the address for later undo
-    status.orig_bytes.open_process_address = remote_target_address;
-
-    // Backup original bytes before patching
-    if (!backup_original_bytes(h_process, remote_target_address, status.orig_bytes.open_process_bytes, 6)) {
+    status.orig_bytes.enum_modules_address = remote_target_address;
+    if (!backup_original_bytes(h_process, remote_target_address, status.orig_bytes.enum_modules_bytes, 6)) {
         add_log(status, "Failed to backup original bytes before patching", patch_status::LogLevel::ERR);
         return 1;
     }
 
-    // Allocate memory for ultra-simple payload
     uintptr_t allocated_memory = allocate_memory_near_address(h_process, remote_target_address, 0x1000);
     if (!allocated_memory) {
         add_log(status, "Could not allocate memory near target address", patch_status::LogLevel::ERR);
         return 1;
     }
 
-    // ULTRA-SIMPLE PAYLOAD: Just force minimal access and jump to original
+    // SIMPLE PAYLOAD: Return FALSE for K32EnumProcessModules
     if (!write_memory_with_protection_dynamic(h_process, allocated_memory,
         {
-            0xB9, 0x00, 0x10, 0x00, 0x00,             // mov ecx, 0x1000 (PROCESS_QUERY_LIMITED_INFORMATION)
-            0x48, 0xB8, 0x00, 0x00, 0x00, 0x00,       // mov rax, original_address (placeholder)
-            0x00, 0x00, 0x00, 0x00,                   // (will be patched)
-            0xFF, 0xE0                                // jmp rax
+            // Check if the target process handle is for a browser process
+            // For simplicity, we'll just return FALSE for all enum attempts
+            0x31, 0xC0,                               // xor eax, eax (set return value to 0/FALSE)
+            0xC3                                      // ret (return immediately)
         }))
     {
-        add_log(status, "Could not write simple payload to allocated memory region", patch_status::LogLevel::ERR);
-        return 1;
-    }
-
-    // Calculate address to jump to (skip our 6-byte patch)
-    uintptr_t jump_target = remote_target_address + 6;
-
-    // Write the jump target address into our payload
-    if (!WriteProcessMemory(h_process,
-        reinterpret_cast<LPVOID>(allocated_memory + 6), // Offset to the mov rax instruction
-        &jump_target, sizeof(jump_target), nullptr)) {
-        add_log(status, "Could not patch jump target into payload", patch_status::LogLevel::ERR);
+        add_log(status, "Could not write K32EnumProcessModules patch", patch_status::LogLevel::ERR);
         return 1;
     }
 
     // Create and write the JMP instruction
     std::array<uint8_t, 5> jmp_instruction_bytes;
     if (!assemble_jump_near_instruction(jmp_instruction_bytes.data(), remote_target_address, allocated_memory)) {
-        add_log(status, "Allocated memory address is too far to assemble a jump near to", patch_status::LogLevel::ERR);
+        add_log(status, "Could not assemble jump instruction", patch_status::LogLevel::ERR);
         return 1;
     }
 
@@ -967,11 +949,11 @@ int patch_open_process(HANDLE h_process, patch_status& status) {
     buffer[5] = 0x90; // NOP
 
     if (!write_memory_with_protection(h_process, remote_target_address, buffer.data(), buffer.size())) {
-        add_log(status, "Could not write jump instruction to target address", patch_status::LogLevel::ERR);
+        add_log(status, "Could not write jump instruction", patch_status::LogLevel::ERR);
         return 1;
     }
 
-    add_log(status, "Applied simple OpenProcess access rights restriction", patch_status::LogLevel::SUCCESS);
+    add_log(status, "Applied K32EnumProcessModules patch - blocking module enumeration", patch_status::LogLevel::SUCCESS);
     return 0;
 }
 
@@ -1078,14 +1060,14 @@ bool undo_patches(patch_status& status, const std::string& config_path) {
         }
     }
 
-    // Restore OpenProcess
-    if (status.orig_bytes.open_process_address != 0 && !status.orig_bytes.open_process_bytes.empty()) {
-        if (!restore_original_bytes(h_process, status.orig_bytes.open_process_address, status.orig_bytes.open_process_bytes)) {
-            add_log(status, "Failed to restore OpenProcess", patch_status::LogLevel::ERR);
+    // Restore K32EnumProcessModules
+    if (status.orig_bytes.enum_modules_address != 0 && !status.orig_bytes.enum_modules_bytes.empty()) {
+        if (!restore_original_bytes(h_process, status.orig_bytes.enum_modules_address, status.orig_bytes.enum_modules_bytes)) {
+            add_log(status, "Failed to restore K32EnumProcessModules", patch_status::LogLevel::ERR);
             success = false;
         }
         else {
-            add_log(status, "Successfully restored OpenProcess", patch_status::LogLevel::SUCCESS);
+            add_log(status, "Successfully restored K32EnumProcessModules", patch_status::LogLevel::SUCCESS);
         }
     }
 
@@ -1232,9 +1214,9 @@ void patching_thread(patch_status* status, const std::string& config_path) {
                 continue;
             }
 
-            error_code = patch_open_process(h_process, *status);
+            error_code = patch_k32_enum_process_modules(h_process, *status);
             if (error_code) {
-                add_log(*status, "Failed to apply OpenProcess patch", patch_status::LogLevel::ERR);
+                add_log(*status, "Failed to apply EnumProcessModules patch", patch_status::LogLevel::ERR);
                 CloseHandle(h_process);
                 status->is_patched = false;
                 status->wait_for_process = true;
