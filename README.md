@@ -10,7 +10,10 @@ A lightweight tool that enables NVIDIA Shadowplay to record content normally fla
 - **Automatic Detection**: Monitors and automatically patches the NVIDIA Container process (nvcontainer.exe)
 - **Protection Bypasses**: 
   - Patches `GetWindowDisplayAffinity` to prevent screen content protection detection.
-  - Patches `Module32FirstW` to prevent process scanning mechanisms.
+  - Patches `Process32FirstW` and `Process32NextW` to prevent process enumeration.
+  - Patches `Module32FirstW` and `Module32NextW` to prevent module enumeration.
+  - Patches `EnumWindows` and `GetWindowInfo` to prevent window enumeration.
+  - Patches `OpenProcess` to restrict access to protected processes.
 - **Patch Now**:
   - You can patch out the NVIDIA restrictions just with a press of a button!
 - **Undo Patches**:
@@ -24,13 +27,14 @@ A lightweight tool that enables NVIDIA Shadowplay to record content normally fla
 ## Usage
 1. Download and run the `.exe` from Releases tab.
 2. The tool will automatically detect and patch NVIDIA processes.
-3. Configure startup and auto-close settings as desired.
-4. Check the log window for patching status and details.
+3. Configure settings as desired.
+4. Click 'Patch Now' for patch to be applied.
+5. Check the log window for patching status and details.
 
 ## Technical Details
 This tool works by injecting memory patches into NVIDIA's container process, specifically targeting the functions that detect protected content. By bypassing these detection mechanisms, Shadowplay can record content from applications that would normally trigger the "Recording is not available due to restricted content" error.
 
 ## Credits
-This project builds upon and improves [ShadowPlay_Patcher by furyzenblade](https://github.com/furyzenblade/ShadowPlay_Patcher), implementing cleaner code and a user-friendly interface.
+This project builds upon the foundation of [ShadowPlay_Patcher by furyzenblade](https://github.com/furyzenblade/ShadowPlay_Patcher), introducing a cleaner architecture, enhanced stability, an intuitive UI, and multiple additional patches to fully bypass NVIDIA Instant Replay protection mechanisms.
 
-Make sure to check it out, it explains how this bypass works a lot better than here.
+Make sure to check it out, I wouldn't have made this program without their research!
