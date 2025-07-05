@@ -906,11 +906,15 @@ int patch_k32_enum_process_modules(HANDLE h_process, patch_status& status) {
         return 1;
     }
 
+    add_log(status, "Found KERNEL32.dll base address for K32EnumProcessModules: 0x" + int_to_hex(remote_kernel32_base), patch_status::LogLevel::INFO);
+
     uintptr_t remote_target_address = get_exported_function_address(h_process, remote_kernel32_base, L"KERNEL32.dll", "K32EnumProcessModules");
     if (!remote_target_address) {
         add_log(status, "Could not get remote address of K32EnumProcessModules", patch_status::LogLevel::ERR);
         return 1;
     }
+
+    add_log(status, "Found address of K32EnumProcessModules: 0x" + int_to_hex(remote_target_address), patch_status::LogLevel::INFO);
 
     status.orig_bytes.enum_modules_address = remote_target_address;
     if (!backup_original_bytes(h_process, remote_target_address, status.orig_bytes.enum_modules_bytes, 6)) {
@@ -937,6 +941,8 @@ int patch_k32_enum_process_modules(HANDLE h_process, patch_status& status) {
         return 1;
     }
 
+    add_log(status, "K32EnumProcessModules payload written successfully", patch_status::LogLevel::INFO);
+
     // Create and write the JMP instruction
     std::array<uint8_t, 5> jmp_instruction_bytes;
     if (!assemble_jump_near_instruction(jmp_instruction_bytes.data(), remote_target_address, allocated_memory)) {
@@ -953,7 +959,7 @@ int patch_k32_enum_process_modules(HANDLE h_process, patch_status& status) {
         return 1;
     }
 
-    add_log(status, "Applied K32EnumProcessModules patch - blocking module enumeration", patch_status::LogLevel::SUCCESS);
+    add_log(status, "Placed hook at KERNEL32.K32EnumProcessModules", patch_status::LogLevel::SUCCESS);
     return 0;
 }
 
