@@ -23,7 +23,7 @@
 
 // Copyright information
 #define COPYRIGHT_INFO "Made by nloginov,\nResearch by furyzenblade"
-#define VERSION "1.4.0"
+#define VERSION "1.4.1"
 
 // Forward declarations
 extern IMGUI_IMPL_API LRESULT ImGui_ImplWin32_WndProcHandler(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam);
@@ -39,6 +39,9 @@ static ID3D11RenderTargetView* g_main_render_target_view = NULL;
 
 // Original bytes storage for patch restoration
 struct original_bytes {
+    // Process opening
+    std::vector<uint8_t> open_process_bytes;
+
     // Process enumeration
     std::vector<uint8_t> process32_first_w_bytes;
     std::vector<uint8_t> process32_next_w_bytes;
@@ -64,6 +67,7 @@ struct original_bytes {
     std::vector<uint8_t> k32_get_module_base_name_a_bytes;
 
     // Address fields
+    uintptr_t open_process_address = 0;
     uintptr_t process32_first_w_address = 0;
     uintptr_t process32_next_w_address = 0;
     uintptr_t module32_first_w_address = 0;
@@ -87,7 +91,7 @@ struct original_bytes {
 enum class patch_type {
     RETURN_FALSE,
     RETURN_TRUE,
-    WDA_NONE_,
+    WDA_NONE_
 };
 
 struct patch_config {
@@ -254,6 +258,7 @@ void save_patch_info(const original_bytes& orig_bytes, const std::string& config
     file.write(reinterpret_cast<const char*>(&orig_bytes.process_id), sizeof(orig_bytes.process_id));
 
     // Write addresses
+    file.write(reinterpret_cast<const char*>(&orig_bytes.open_process_address), sizeof(orig_bytes.open_process_address));
     file.write(reinterpret_cast<const char*>(&orig_bytes.window_display_affinity_address), sizeof(orig_bytes.window_display_affinity_address));
     file.write(reinterpret_cast<const char*>(&orig_bytes.process32_first_w_address), sizeof(orig_bytes.process32_first_w_address));
     file.write(reinterpret_cast<const char*>(&orig_bytes.process32_next_w_address), sizeof(orig_bytes.process32_next_w_address));
@@ -281,6 +286,7 @@ void save_patch_info(const original_bytes& orig_bytes, const std::string& config
         };
 
     // Write all byte vectors
+    write_bytes(orig_bytes.open_process_bytes);
     write_bytes(orig_bytes.window_display_affinity_bytes);
     write_bytes(orig_bytes.process32_first_w_bytes);
     write_bytes(orig_bytes.process32_next_w_bytes);
@@ -313,6 +319,7 @@ bool load_patch_info(original_bytes& orig_bytes, const std::string& config_path)
         file.read(reinterpret_cast<char*>(&orig_bytes.process_id), sizeof(orig_bytes.process_id));
 
         // Read addresses
+        file.read(reinterpret_cast<char*>(&orig_bytes.open_process_address), sizeof(orig_bytes.open_process_address));
         file.read(reinterpret_cast<char*>(&orig_bytes.window_display_affinity_address), sizeof(orig_bytes.window_display_affinity_address));
         file.read(reinterpret_cast<char*>(&orig_bytes.process32_first_w_address), sizeof(orig_bytes.process32_first_w_address));
         file.read(reinterpret_cast<char*>(&orig_bytes.process32_next_w_address), sizeof(orig_bytes.process32_next_w_address));
@@ -341,6 +348,7 @@ bool load_patch_info(original_bytes& orig_bytes, const std::string& config_path)
             };
 
         // Read all byte vectors
+        read_bytes(orig_bytes.open_process_bytes);
         read_bytes(orig_bytes.window_display_affinity_bytes);
         read_bytes(orig_bytes.process32_first_w_bytes);
         read_bytes(orig_bytes.process32_next_w_bytes);
@@ -482,6 +490,15 @@ int apply_patch(HANDLE h_process, patch_status& status, const patch_config& conf
 
 std::vector<patch_config> get_patch_configs(patch_status& status) {
     return {
+        // Process opening patches
+        {
+            "OpenProcess", L"KERNEL32.dll", patch_type::RETURN_FALSE,
+            {0x48, 0x31, 0xC0, 0xC3}, // xor rax, rax; ret
+            &status.orig_bytes.open_process_bytes,
+            &status.orig_bytes.open_process_address,
+            12
+        },
+
         // Process enumeration patches
         {
             "Process32FirstW", L"KERNEL32.DLL", patch_type::RETURN_FALSE,
@@ -656,6 +673,7 @@ bool undo_patches(patch_status& status, const std::string& config_path) {
         }
 
     // Restore common patches with proper names
+    RESTORE_PATCH(open_process, "OpenProcess");
     RESTORE_PATCH(window_display_affinity, "GetWindowDisplayAffinity");
     RESTORE_PATCH(process32_first_w, "Process32FirstW");
     RESTORE_PATCH(process32_next_w, "Process32NextW");
@@ -855,7 +873,6 @@ void apply_style() {
     colors[ImGuiCol_NavWindowingDimBg] = ImVec4(0.80f, 0.80f, 0.80f, 0.20f);
     colors[ImGuiCol_ModalWindowDimBg] = ImVec4(0.80f, 0.80f, 0.80f, 0.35f);
 }
-
 
 std::string get_config_path() {
     char path[MAX_PATH];
