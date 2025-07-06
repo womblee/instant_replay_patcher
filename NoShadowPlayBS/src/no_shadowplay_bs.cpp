@@ -23,7 +23,7 @@
 
 // Copyright information
 #define COPYRIGHT_INFO "Made by nloginov,\nResearch by furyzenblade"
-#define VERSION "1.3.3"
+#define VERSION "1.4.0"
 
 // Forward declarations
 extern IMGUI_IMPL_API LRESULT ImGui_ImplWin32_WndProcHandler(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam);
@@ -39,25 +39,65 @@ static ID3D11RenderTargetView* g_main_render_target_view = NULL;
 
 // Original bytes storage for patch restoration
 struct original_bytes {
-    std::vector<uint8_t> window_display_affinity_bytes;
+    // Process enumeration
     std::vector<uint8_t> process32_first_w_bytes;
     std::vector<uint8_t> process32_next_w_bytes;
+
+    // Module enumeration
     std::vector<uint8_t> module32_first_w_bytes;
     std::vector<uint8_t> module32_next_w_bytes;
-    std::vector<uint8_t> enum_windows_bytes;
-    std::vector<uint8_t> get_window_info_bytes;
     std::vector<uint8_t> enum_modules_bytes;
 
-    uintptr_t wda_address = 0;
+    // Window enumeration
+    std::vector<uint8_t> enum_windows_bytes;
+    std::vector<uint8_t> get_window_info_bytes;
+    std::vector<uint8_t> window_display_affinity_bytes;
+
+    // Module info
+    std::vector<uint8_t> get_module_handle_a_bytes;
+    std::vector<uint8_t> get_module_handle_w_bytes;
+    std::vector<uint8_t> get_module_handle_ex_a_bytes;
+    std::vector<uint8_t> get_module_handle_ex_w_bytes;
+    std::vector<uint8_t> get_module_filename_a_bytes;
+    std::vector<uint8_t> get_module_filename_w_bytes;
+    std::vector<uint8_t> k32_get_module_filename_ex_a_bytes;
+    std::vector<uint8_t> k32_get_module_base_name_a_bytes;
+
+    // Address fields
     uintptr_t process32_first_w_address = 0;
     uintptr_t process32_next_w_address = 0;
     uintptr_t module32_first_w_address = 0;
     uintptr_t module32_next_w_address = 0;
+    uintptr_t enum_modules_address = 0;
     uintptr_t enum_windows_address = 0;
     uintptr_t get_window_info_address = 0;
-    uintptr_t enum_modules_address = 0;
+    uintptr_t window_display_affinity_address = 0;
+    uintptr_t get_module_handle_a_address = 0;
+    uintptr_t get_module_handle_w_address = 0;
+    uintptr_t get_module_handle_ex_a_address = 0;
+    uintptr_t get_module_handle_ex_w_address = 0;
+    uintptr_t get_module_filename_a_address = 0;
+    uintptr_t get_module_filename_w_address = 0;
+    uintptr_t k32_get_module_filename_ex_a_address = 0;
+    uintptr_t k32_get_module_base_name_a_address = 0;
 
     DWORD process_id = 0;
+};
+
+enum class patch_type {
+    RETURN_FALSE,
+    RETURN_TRUE,
+    WDA_NONE_,
+};
+
+struct patch_config {
+    const char* function_name;
+    const wchar_t* module_name;
+    patch_type patch_type;
+    std::vector<uint8_t> patch_bytes;
+    std::vector<uint8_t>* backup_bytes;
+    uintptr_t* address_field;
+    size_t patch_size;
 };
 
 // Patch status tracking with improved logging
@@ -76,7 +116,7 @@ struct patch_status {
     original_bytes orig_bytes;
 
     // Log levels
-    enum LogLevel {
+    enum log_level {
         INFO,
         WARNING,
         ERR,
@@ -179,20 +219,20 @@ std::string get_timestamp() {
 }
 
 // Improved add_log function with log levels
-void add_log(patch_status& status, const std::string& message, patch_status::LogLevel level = patch_status::LogLevel::INFO) {
+void add_log(patch_status& status, const std::string& message, patch_status::log_level level = patch_status::log_level::INFO) {
     std::string prefix;
 
     switch (level) {
-    case patch_status::LogLevel::INFO:
+    case patch_status::log_level::INFO:
         prefix = "[INFO]";
         break;
-    case patch_status::LogLevel::WARNING:
+    case patch_status::log_level::WARNING:
         prefix = "[WARNING]";
         break;
-    case patch_status::LogLevel::ERR:
+    case patch_status::log_level::ERR:
         prefix = "[ERROR]";
         break;
-    case patch_status::LogLevel::SUCCESS:
+    case patch_status::log_level::SUCCESS:
         prefix = "[SUCCESS]";
         break;
     }
@@ -214,7 +254,7 @@ void save_patch_info(const original_bytes& orig_bytes, const std::string& config
     file.write(reinterpret_cast<const char*>(&orig_bytes.process_id), sizeof(orig_bytes.process_id));
 
     // Write addresses
-    file.write(reinterpret_cast<const char*>(&orig_bytes.wda_address), sizeof(orig_bytes.wda_address));
+    file.write(reinterpret_cast<const char*>(&orig_bytes.window_display_affinity_address), sizeof(orig_bytes.window_display_affinity_address));
     file.write(reinterpret_cast<const char*>(&orig_bytes.process32_first_w_address), sizeof(orig_bytes.process32_first_w_address));
     file.write(reinterpret_cast<const char*>(&orig_bytes.process32_next_w_address), sizeof(orig_bytes.process32_next_w_address));
     file.write(reinterpret_cast<const char*>(&orig_bytes.module32_first_w_address), sizeof(orig_bytes.module32_first_w_address));
@@ -222,6 +262,14 @@ void save_patch_info(const original_bytes& orig_bytes, const std::string& config
     file.write(reinterpret_cast<const char*>(&orig_bytes.enum_windows_address), sizeof(orig_bytes.enum_windows_address));
     file.write(reinterpret_cast<const char*>(&orig_bytes.get_window_info_address), sizeof(orig_bytes.get_window_info_address));
     file.write(reinterpret_cast<const char*>(&orig_bytes.enum_modules_address), sizeof(orig_bytes.enum_modules_address));
+    file.write(reinterpret_cast<const char*>(&orig_bytes.get_module_handle_a_address), sizeof(orig_bytes.get_module_handle_a_address));
+    file.write(reinterpret_cast<const char*>(&orig_bytes.get_module_handle_w_address), sizeof(orig_bytes.get_module_handle_w_address));
+    file.write(reinterpret_cast<const char*>(&orig_bytes.get_module_handle_ex_a_address), sizeof(orig_bytes.get_module_handle_ex_a_address));
+    file.write(reinterpret_cast<const char*>(&orig_bytes.get_module_handle_ex_w_address), sizeof(orig_bytes.get_module_handle_ex_w_address));
+    file.write(reinterpret_cast<const char*>(&orig_bytes.get_module_filename_a_address), sizeof(orig_bytes.get_module_filename_a_address));
+    file.write(reinterpret_cast<const char*>(&orig_bytes.get_module_filename_w_address), sizeof(orig_bytes.get_module_filename_w_address));
+    file.write(reinterpret_cast<const char*>(&orig_bytes.k32_get_module_filename_ex_a_address), sizeof(orig_bytes.k32_get_module_filename_ex_a_address));
+    file.write(reinterpret_cast<const char*>(&orig_bytes.k32_get_module_base_name_a_address), sizeof(orig_bytes.k32_get_module_base_name_a_address));
 
     // Helper lambda to write byte vectors
     auto write_bytes = [&file](const std::vector<uint8_t>& bytes) {
@@ -241,6 +289,14 @@ void save_patch_info(const original_bytes& orig_bytes, const std::string& config
     write_bytes(orig_bytes.enum_windows_bytes);
     write_bytes(orig_bytes.get_window_info_bytes);
     write_bytes(orig_bytes.enum_modules_bytes);
+    write_bytes(orig_bytes.get_module_handle_a_bytes);
+    write_bytes(orig_bytes.get_module_handle_w_bytes);
+    write_bytes(orig_bytes.get_module_handle_ex_a_bytes);
+    write_bytes(orig_bytes.get_module_handle_ex_w_bytes);
+    write_bytes(orig_bytes.get_module_filename_a_bytes);
+    write_bytes(orig_bytes.get_module_filename_w_bytes);
+    write_bytes(orig_bytes.k32_get_module_filename_ex_a_bytes);
+    write_bytes(orig_bytes.k32_get_module_base_name_a_bytes);
 
     file.close();
 }
@@ -257,7 +313,7 @@ bool load_patch_info(original_bytes& orig_bytes, const std::string& config_path)
         file.read(reinterpret_cast<char*>(&orig_bytes.process_id), sizeof(orig_bytes.process_id));
 
         // Read addresses
-        file.read(reinterpret_cast<char*>(&orig_bytes.wda_address), sizeof(orig_bytes.wda_address));
+        file.read(reinterpret_cast<char*>(&orig_bytes.window_display_affinity_address), sizeof(orig_bytes.window_display_affinity_address));
         file.read(reinterpret_cast<char*>(&orig_bytes.process32_first_w_address), sizeof(orig_bytes.process32_first_w_address));
         file.read(reinterpret_cast<char*>(&orig_bytes.process32_next_w_address), sizeof(orig_bytes.process32_next_w_address));
         file.read(reinterpret_cast<char*>(&orig_bytes.module32_first_w_address), sizeof(orig_bytes.module32_first_w_address));
@@ -265,6 +321,14 @@ bool load_patch_info(original_bytes& orig_bytes, const std::string& config_path)
         file.read(reinterpret_cast<char*>(&orig_bytes.enum_windows_address), sizeof(orig_bytes.enum_windows_address));
         file.read(reinterpret_cast<char*>(&orig_bytes.get_window_info_address), sizeof(orig_bytes.get_window_info_address));
         file.read(reinterpret_cast<char*>(&orig_bytes.enum_modules_address), sizeof(orig_bytes.enum_modules_address));
+        file.read(reinterpret_cast<char*>(&orig_bytes.get_module_handle_a_address), sizeof(orig_bytes.get_module_handle_a_address));
+        file.read(reinterpret_cast<char*>(&orig_bytes.get_module_handle_w_address), sizeof(orig_bytes.get_module_handle_w_address));
+        file.read(reinterpret_cast<char*>(&orig_bytes.get_module_handle_ex_a_address), sizeof(orig_bytes.get_module_handle_ex_a_address));
+        file.read(reinterpret_cast<char*>(&orig_bytes.get_module_handle_ex_w_address), sizeof(orig_bytes.get_module_handle_ex_w_address));
+        file.read(reinterpret_cast<char*>(&orig_bytes.get_module_filename_a_address), sizeof(orig_bytes.get_module_filename_a_address));
+        file.read(reinterpret_cast<char*>(&orig_bytes.get_module_filename_w_address), sizeof(orig_bytes.get_module_filename_w_address));
+        file.read(reinterpret_cast<char*>(&orig_bytes.k32_get_module_filename_ex_a_address), sizeof(orig_bytes.k32_get_module_filename_ex_a_address));
+        file.read(reinterpret_cast<char*>(&orig_bytes.k32_get_module_base_name_a_address), sizeof(orig_bytes.k32_get_module_base_name_a_address));
 
         // Helper lambda to read byte vectors
         auto read_bytes = [&file](std::vector<uint8_t>& bytes) {
@@ -285,6 +349,14 @@ bool load_patch_info(original_bytes& orig_bytes, const std::string& config_path)
         read_bytes(orig_bytes.enum_windows_bytes);
         read_bytes(orig_bytes.get_window_info_bytes);
         read_bytes(orig_bytes.enum_modules_bytes);
+        read_bytes(orig_bytes.get_module_handle_a_bytes);
+        read_bytes(orig_bytes.get_module_handle_w_bytes);
+        read_bytes(orig_bytes.get_module_handle_ex_a_bytes);
+        read_bytes(orig_bytes.get_module_handle_ex_w_bytes);
+        read_bytes(orig_bytes.get_module_filename_a_bytes);
+        read_bytes(orig_bytes.get_module_filename_w_bytes);
+        read_bytes(orig_bytes.k32_get_module_filename_ex_a_bytes);
+        read_bytes(orig_bytes.k32_get_module_base_name_a_bytes);
 
         file.close();
         return true;
@@ -318,7 +390,7 @@ bool is_process_patched(HANDLE h_process, uintptr_t target_address, patch_status
     SIZE_T bytes_read;
 
     if (!ReadProcessMemory(h_process, (LPCVOID)target_address, current_bytes.data(), current_bytes.size(), &bytes_read)) {
-        add_log(status, "Failed to read memory for patch check", patch_status::LogLevel::ERR);
+        add_log(status, "Failed to read memory for patch check", patch_status::log_level::ERR);
         return false;
     }
 
@@ -343,639 +415,222 @@ bool restore_original_bytes(HANDLE h_process, uintptr_t target_address, const st
     return write_memory_with_protection(h_process, target_address, original_bytes.data(), original_bytes.size());
 }
 
-int patch_get_window_display_affinity(HANDLE h_process, patch_status& status) {
-    // Get USER32.dll base address
-    uintptr_t remote_user32_base = get_remote_module_base_address(h_process, L"USER32.dll");
-    if (!remote_user32_base) {
-        add_log(status, "Could not get USER32.dll base address", patch_status::LogLevel::ERR);
+int apply_patch(HANDLE h_process, patch_status& status, const patch_config& config) {
+    // Get module base address
+    uintptr_t module_base = get_remote_module_base_address(h_process, config.module_name);
+    if (!module_base) {
+        add_log(status, std::string("Could not get module base address for ") + config.function_name, patch_status::log_level::ERR);
         return 1;
     }
 
-    add_log(status, "Found USER32.dll base address: 0x" + int_to_hex(remote_user32_base), patch_status::LogLevel::INFO);
-
-    // Get the address of the target function
-    uintptr_t remote_target_address = get_exported_function_address(h_process, remote_user32_base, L"USER32.dll", "GetWindowDisplayAffinity");
-    if (!remote_target_address) {
-        add_log(status, "Could not get remote address of GetWindowDisplayAffinity", patch_status::LogLevel::ERR);
+    // Get function address
+    uintptr_t func_addr = get_exported_function_address(h_process, module_base, config.module_name, config.function_name);
+    if (!func_addr) {
+        add_log(status, std::string("Could not get address of ") + config.function_name, patch_status::log_level::ERR);
         return 1;
     }
 
-    add_log(status, "Found address of GetWindowDisplayAffinity: 0x" + int_to_hex(remote_target_address), patch_status::LogLevel::INFO);
-
-    // Store the address for later undo
-    status.orig_bytes.wda_address = remote_target_address;
+    // Store address for undo
+    *(config.address_field) = func_addr;
 
     // Check if already patched
-    if (is_process_patched(h_process, remote_target_address, status)) {
-        add_log(status, "GetWindowDisplayAffinity already appears to be patched", patch_status::LogLevel::WARNING);
+    if (is_process_patched(h_process, func_addr, status)) {
+        add_log(status, std::string(config.function_name) + " already appears to be patched", patch_status::log_level::WARNING);
         return 0;
     }
 
-    // Backup original bytes before patching
-    if (!backup_original_bytes(h_process, remote_target_address, status.orig_bytes.window_display_affinity_bytes, 6)) {
-        add_log(status, "Failed to backup original bytes before patching", patch_status::LogLevel::ERR);
+    // Backup original bytes
+    config.backup_bytes->resize(config.patch_size);
+    if (!backup_original_bytes(h_process, func_addr, *config.backup_bytes, config.patch_size)) {
+        add_log(status, std::string("Failed to backup ") + config.function_name, patch_status::log_level::ERR);
         return 1;
     }
 
-    // Allocate memory in the target process
-    uintptr_t allocated_memory = allocate_memory_near_address(h_process, remote_target_address, 0x1000);
+    // Allocate memory for patch
+    uintptr_t allocated_memory = allocate_memory_near_address(h_process, func_addr, 0x1000);
     if (!allocated_memory) {
-        add_log(status, "Could not allocate memory near target address", patch_status::LogLevel::ERR);
+        add_log(status, std::string("Could not allocate memory near ") + config.function_name, patch_status::log_level::ERR);
         return 1;
     }
 
-    add_log(status, "Allocated 1kb of memory at: 0x" + int_to_hex(allocated_memory), patch_status::LogLevel::INFO);
-
-    // IMPROVED PAYLOAD: Set *pdwAffinity = WDA_NONE and return TRUE
-    if (!write_memory_with_protection_dynamic(h_process, allocated_memory,
-        {
-            0x48, 0x85, 0xD2,                         // test rdx, rdx
-            0x74, 0x06,                               // je +6 (skip write if rdx == NULL)
-            0xC7, 0x02, 0x00, 0x00, 0x00, 0x00,       // mov dword ptr [rdx], 0 (WDA_NONE)
-            0xB8, 0x01, 0x00, 0x00, 0x00,             // mov eax, 1 (return TRUE)
-            0xC3                                      // ret
-        }))
-    {
-        add_log(status, "Could not write payload to allocated memory region", patch_status::LogLevel::ERR);
+    // Write the payload
+    if (!write_memory_with_protection_dynamic(h_process, allocated_memory, config.patch_bytes)) {
+        add_log(status, std::string("Could not write payload for ") + config.function_name, patch_status::log_level::ERR);
         return 1;
     }
 
-    add_log(status, "Payload written successfully to allocated memory region", patch_status::LogLevel::INFO);
-
-    // Assemble the JMP instruction
-    std::array<uint8_t, 5> jmp_instruction_bytes;
-    if (!assemble_jump_near_instruction(jmp_instruction_bytes.data(), remote_target_address, allocated_memory)) {
-        add_log(status, "Allocated memory address is too far to assemble a jump near to", patch_status::LogLevel::ERR);
+    // Create and write jump instruction
+    std::array<uint8_t, 5> jmp_instruction;
+    if (!assemble_jump_near_instruction(jmp_instruction.data(), func_addr, allocated_memory)) {
+        add_log(status, std::string("Jump too far for ") + config.function_name, patch_status::log_level::ERR);
         return 1;
     }
 
-    add_log(status, "Assembled jump instruction: " + bytes_to_hex_string(jmp_instruction_bytes.data(), jmp_instruction_bytes.size()), patch_status::LogLevel::INFO);
+    // Prepare final patch (jmp + nops)
+    std::vector<uint8_t> final_patch(jmp_instruction.begin(), jmp_instruction.end());
+    final_patch.resize(config.patch_size, 0x90); // Fill rest with NOPs
 
-    // Write the JMP instruction (plus 1 nop for the left over byte)
-    std::array<uint8_t, 6> buffer;
-    std::copy(jmp_instruction_bytes.begin(), jmp_instruction_bytes.end(), buffer.begin());
-    buffer[5] = 0x90; // NOP instruction
-
-    if (!write_memory_with_protection(h_process, remote_target_address, buffer.data(), buffer.size())) {
-        add_log(status, "Could not write jump instruction and NOP to target address", patch_status::LogLevel::ERR);
+    if (!write_memory_with_protection(h_process, func_addr, final_patch.data(), final_patch.size())) {
+        add_log(status, std::string("Could not write final patch for ") + config.function_name, patch_status::log_level::ERR);
         return 1;
     }
-    add_log(status, "Placed hook at USER32.GetWindowDisplayAffinity", patch_status::LogLevel::SUCCESS);
+
+    add_log(status, std::string("Patched ") + config.function_name, patch_status::log_level::SUCCESS);
 
     return 0;
 }
 
-int patch_kernel32_process32_first_w(HANDLE h_process, patch_status& status) {
-    // Get KERNEL32.DLL base address
-    uintptr_t module_base_address = get_remote_module_base_address(h_process, L"KERNEL32.DLL");
-    if (!module_base_address) {
-        add_log(status, "Could not get KERNEL32.DLL base address for Process32FirstW", patch_status::LogLevel::ERR);
-        return 1;
-    }
-
-    add_log(status, "Found KERNEL32.DLL base address for Process32FirstW: 0x" + int_to_hex(module_base_address), patch_status::LogLevel::INFO);
-
-    // Get the address of the target function
-    uintptr_t function_address = get_exported_function_address(h_process, module_base_address, L"KERNEL32.DLL", "Process32FirstW");
-    if (!function_address) {
-        add_log(status, "Could not get remote address of Process32FirstW", patch_status::LogLevel::ERR);
-        return 1;
-    }
-
-    add_log(status, "Found address of Process32FirstW: 0x" + int_to_hex(function_address), patch_status::LogLevel::INFO);
-
-    // Store the address for later undo
-    status.orig_bytes.process32_first_w_address = function_address;
-
-    // Check if already patched
-    if (is_process_patched(h_process, function_address, status)) {
-        add_log(status, "Process32FirstW already appears to be patched", patch_status::LogLevel::WARNING);
-        return 0; // Consider this a success, it's already patched
-    }
-
-    // Backup original bytes before patching
-    if (!backup_original_bytes(h_process, function_address, status.orig_bytes.process32_first_w_bytes, 7)) {
-        add_log(status, "Failed to backup original bytes for Process32FirstW", patch_status::LogLevel::ERR);
-        return 1;
-    }
-
-    // Allocate memory in the target process
-    uintptr_t allocated_memory = allocate_memory_near_address(h_process, function_address, 0x1000);
-    if (!allocated_memory) {
-        add_log(status, "Could not allocate memory near Process32FirstW address", patch_status::LogLevel::ERR);
-        return 1;
-    }
-
-    add_log(status, "Allocated 1kb of memory for Process32FirstW at: 0x" + int_to_hex(allocated_memory), patch_status::LogLevel::INFO);
-
-    // Place payload at new memory location - return FALSE (0) to indicate failure
-    if (!write_memory_with_protection_dynamic(h_process, allocated_memory,
+std::vector<patch_config> get_patch_configs(patch_status& status) {
+    return {
+        // Process enumeration patches
         {
-            0x48, 0x31, 0xC0,   // xor rax, rax (set return value to 0/FALSE)
-            0xC3                // ret
-        })
-        ) {
-        add_log(status, "Could not write Process32FirstW payload to allocated memory region", patch_status::LogLevel::ERR);
-        return 1;
-    }
+            "Process32FirstW", L"KERNEL32.DLL", patch_type::RETURN_FALSE,
+            {0x48, 0x31, 0xC0, 0xC3}, // xor rax, rax; ret
+            &status.orig_bytes.process32_first_w_bytes,
+            &status.orig_bytes.process32_first_w_address,
+            7
+        },
+        {
+            "Process32NextW", L"KERNEL32.DLL", patch_type::RETURN_FALSE,
+            {0x48, 0x31, 0xC0, 0xC3}, // xor rax, rax; ret
+            &status.orig_bytes.process32_next_w_bytes,
+            &status.orig_bytes.process32_next_w_address,
+            7
+        },
 
-    add_log(status, "Process32FirstW payload written successfully", patch_status::LogLevel::INFO);
+        // Module enumeration patches
+        {
+            "Module32FirstW", L"KERNEL32.DLL", patch_type::RETURN_FALSE,
+            {0x48, 0x31, 0xC0, 0xC3}, // xor rax, rax; ret
+            &status.orig_bytes.module32_first_w_bytes,
+            &status.orig_bytes.module32_first_w_address,
+            7
+        },
+        {
+            "Module32NextW", L"KERNEL32.DLL", patch_type::RETURN_FALSE,
+            {0x48, 0x31, 0xC0, 0xC3}, // xor rax, rax; ret
+            &status.orig_bytes.module32_next_w_bytes,
+            &status.orig_bytes.module32_next_w_address,
+            7
+        },
+        {
+            "K32EnumProcessModules", L"KERNEL32.dll", patch_type::RETURN_FALSE,
+            {0x31, 0xC0, 0xC3}, // xor eax, eax; ret
+            &status.orig_bytes.enum_modules_bytes,
+            &status.orig_bytes.enum_modules_address,
+            6
+        },
 
-    // Assemble the JMP instruction
-    std::array<uint8_t, 5> jmp_instruction_bytes;
-    if (!assemble_jump_near_instruction(jmp_instruction_bytes.data(), function_address, allocated_memory)) {
-        add_log(status, "Process32FirstW allocated memory address is too far to assemble a jump near to", patch_status::LogLevel::ERR);
-        return 1;
-    }
+        // Window enumeration patches
+        {
+            "EnumWindows", L"USER32.dll", patch_type::RETURN_TRUE,
+            {0x48, 0xC7, 0xC0, 0x01, 0x00, 0x00, 0x00, 0xC3}, // mov rax, 1; ret
+            &status.orig_bytes.enum_windows_bytes,
+            &status.orig_bytes.enum_windows_address,
+            6
+        },
+        {
+            "GetWindowInfo", L"USER32.dll", patch_type::RETURN_TRUE,
+            {0x48, 0xC7, 0xC0, 0x01, 0x00, 0x00, 0x00, 0xC3}, // mov rax, 1; ret
+            &status.orig_bytes.get_window_info_bytes,
+            &status.orig_bytes.get_window_info_address,
+            6
+        },
 
-    add_log(status, "Assembled jump instruction for Process32FirstW: " + bytes_to_hex_string(jmp_instruction_bytes.data(), jmp_instruction_bytes.size()), patch_status::LogLevel::INFO);
+        // Special case for GetWindowDisplayAffinity
+        {
+            "GetWindowDisplayAffinity", L"USER32.dll", patch_type::WDA_NONE_,
+            {0x48, 0x85, 0xD2, 0x74, 0x06, 0xC7, 0x02, 0x00, 0x00, 0x00, 0x00, 0xB8, 0x01, 0x00, 0x00, 0x00, 0xC3},
+            &status.orig_bytes.window_display_affinity_bytes,
+            &status.orig_bytes.window_display_affinity_address,
+            6
+        },
 
-    // Write the JMP instruction (plus 2 nop's for the left over bytes)
-    std::array<uint8_t, 7> buffer;
-    std::copy(jmp_instruction_bytes.begin(), jmp_instruction_bytes.end(), buffer.begin());
-    buffer[5] = 0x90; // NOP instruction
-    buffer[6] = 0x90; // NOP instruction
-
-    if (!write_memory_with_protection(h_process, function_address, buffer.data(), buffer.size())) {
-        add_log(status, "Could not write Process32FirstW jump instruction", patch_status::LogLevel::ERR);
-        return 1;
-    }
-
-    add_log(status, "Placed hook at KERNEL32.Process32FirstW", patch_status::LogLevel::SUCCESS);
-    return 0;
+        // Module handle/name patches
+        {
+            "GetModuleHandleA", L"KERNEL32.dll", patch_type::RETURN_FALSE,
+            {0x31, 0xC0, 0xC3}, // xor eax, eax; ret
+            & status.orig_bytes.get_module_handle_a_bytes,
+            & status.orig_bytes.get_module_handle_a_address,
+            6
+        },
+        {
+            "GetModuleHandleW", L"KERNEL32.dll", patch_type::RETURN_FALSE,
+            {0x31, 0xC0, 0xC3}, // xor eax, eax; ret
+            &status.orig_bytes.get_module_handle_w_bytes,
+            &status.orig_bytes.get_module_handle_w_address,
+            6
+        },
+        {
+            "GetModuleHandleExA", L"KERNEL32.dll", patch_type::RETURN_FALSE,
+            {0x31, 0xC0, 0xC3}, // xor eax, eax; ret
+            &status.orig_bytes.get_module_handle_ex_a_bytes,
+            &status.orig_bytes.get_module_handle_ex_a_address,
+            6
+        },
+        {
+            "GetModuleHandleExW", L"KERNEL32.dll", patch_type::RETURN_FALSE,
+            {0x31, 0xC0, 0xC3}, // xor eax, eax; ret
+            &status.orig_bytes.get_module_handle_ex_w_bytes,
+            &status.orig_bytes.get_module_handle_ex_w_address,
+            6
+        },
+        {
+            "GetModuleFileNameA", L"KERNEL32.dll", patch_type::RETURN_FALSE,
+            {0x31, 0xC0, 0xC3}, // xor eax, eax; ret
+            &status.orig_bytes.get_module_filename_a_bytes,
+            &status.orig_bytes.get_module_filename_a_address,
+            6
+        },
+        {
+            "GetModuleFileNameW", L"KERNEL32.dll", patch_type::RETURN_FALSE,
+            {0x31, 0xC0, 0xC3}, // xor eax, eax; ret
+            &status.orig_bytes.get_module_filename_w_bytes,
+            &status.orig_bytes.get_module_filename_w_address,
+            6
+        },
+        {
+            "K32GetModuleFileNameExA", L"KERNEL32.dll", patch_type::RETURN_FALSE,
+            {0x31, 0xC0, 0xC3}, // xor eax, eax; ret
+            &status.orig_bytes.k32_get_module_filename_ex_a_bytes,
+            &status.orig_bytes.k32_get_module_filename_ex_a_address,
+            6
+        },
+        {
+            "K32GetModuleBaseNameA", L"KERNEL32.dll", patch_type::RETURN_FALSE,
+            {0x31, 0xC0, 0xC3}, // xor eax, eax; ret
+            &status.orig_bytes.k32_get_module_base_name_a_bytes,
+            &status.orig_bytes.k32_get_module_base_name_a_address,
+            6
+        }
+    };
 }
 
-int patch_kernel32_process32_next_w(HANDLE h_process, patch_status& status) {
-    // Get KERNEL32.DLL base address
-    uintptr_t module_base_address = get_remote_module_base_address(h_process, L"KERNEL32.DLL");
-    if (!module_base_address) {
-        add_log(status, "Could not get KERNEL32.DLL base address for Process32NextW", patch_status::LogLevel::ERR);
-        return 1;
+int patch_common_functions(HANDLE h_process, patch_status& status) {
+    auto configs = get_patch_configs(status);
+    int result = 0;
+
+    for (const auto& config : configs) {
+        if (apply_patch(h_process, status, config) != 0) {
+            result = 1; // At least one patch failed, but continue with others
+        }
     }
 
-    add_log(status, "Found KERNEL32.DLL base address for Process32NextW: 0x" + int_to_hex(module_base_address), patch_status::LogLevel::INFO);
-
-    // Get the address of the target function
-    uintptr_t function_address = get_exported_function_address(h_process, module_base_address, L"KERNEL32.DLL", "Process32NextW");
-    if (!function_address) {
-        add_log(status, "Could not get remote address of Process32NextW", patch_status::LogLevel::ERR);
-        return 1;
-    }
-
-    add_log(status, "Found address of Process32NextW: 0x" + int_to_hex(function_address), patch_status::LogLevel::INFO);
-
-    // Store the address for later undo
-    status.orig_bytes.process32_next_w_address = function_address;
-
-    // Check if already patched
-    if (is_process_patched(h_process, function_address, status)) {
-        add_log(status, "Process32NextW already appears to be patched", patch_status::LogLevel::WARNING);
-        return 0;
-    }
-
-    // Backup original bytes before patching
-    if (!backup_original_bytes(h_process, function_address, status.orig_bytes.process32_next_w_bytes, 7)) {
-        add_log(status, "Failed to backup original bytes for Process32NextW", patch_status::LogLevel::ERR);
-        return 1;
-    }
-
-    // Allocate memory in the target process
-    uintptr_t allocated_memory = allocate_memory_near_address(h_process, function_address, 0x1000);
-    if (!allocated_memory) {
-        add_log(status, "Could not allocate memory near Process32NextW address", patch_status::LogLevel::ERR);
-        return 1;
-    }
-
-    add_log(status, "Allocated 1kb of memory for Process32NextW at: 0x" + int_to_hex(allocated_memory), patch_status::LogLevel::INFO);
-
-    // Place payload at new memory location - return FALSE (0) to indicate failure
-    if (!write_memory_with_protection_dynamic(h_process, allocated_memory,
-        {
-            0x48, 0x31, 0xC0,   // xor rax, rax (set return value to 0/FALSE)
-            0xC3                // ret
-        })
-        ) {
-        add_log(status, "Could not write Process32NextW payload to allocated memory region", patch_status::LogLevel::ERR);
-        return 1;
-    }
-
-    add_log(status, "Process32NextW payload written successfully", patch_status::LogLevel::INFO);
-
-    // Assemble the JMP instruction
-    std::array<uint8_t, 5> jmp_instruction_bytes;
-    if (!assemble_jump_near_instruction(jmp_instruction_bytes.data(), function_address, allocated_memory)) {
-        add_log(status, "Process32NextW allocated memory address is too far to assemble a jump near to", patch_status::LogLevel::ERR);
-        return 1;
-    }
-
-    add_log(status, "Assembled jump instruction for Process32NextW: " + bytes_to_hex_string(jmp_instruction_bytes.data(), jmp_instruction_bytes.size()), patch_status::LogLevel::INFO);
-
-    // Write the JMP instruction (plus 2 nop's for the left over bytes)
-    std::array<uint8_t, 7> buffer;
-    std::copy(jmp_instruction_bytes.begin(), jmp_instruction_bytes.end(), buffer.begin());
-    buffer[5] = 0x90; // NOP instruction
-    buffer[6] = 0x90; // NOP instruction
-
-    if (!write_memory_with_protection(h_process, function_address, buffer.data(), buffer.size())) {
-        add_log(status, "Could not write Process32NextW jump instruction", patch_status::LogLevel::ERR);
-        return 1;
-    }
-
-    add_log(status, "Placed hook at KERNEL32.Process32NextW", patch_status::LogLevel::SUCCESS);
-    return 0;
+    return result;
 }
 
-int patch_kernel32_module32_first_w(HANDLE h_process, patch_status& status) {
-    // Get KERNEL32.DLL base address
-    uintptr_t module_base_address = get_remote_module_base_address(h_process, L"KERNEL32.DLL");
-    if (!module_base_address) {
-        add_log(status, "Could not get KERNEL32.DLL base address", patch_status::LogLevel::ERR);
-        return 1;
-    }
-
-    add_log(status, "Found KERNEL32.DLL base address: 0x" + int_to_hex(module_base_address), patch_status::LogLevel::INFO);
-
-    // Get the address of the target function
-    uintptr_t function_address = get_exported_function_address(h_process, module_base_address, L"KERNEL32.DLL", "Module32FirstW");
-    if (!function_address) {
-        add_log(status, "Could not get remote address of Module32FirstW", patch_status::LogLevel::ERR);
-        return 1;
-    }
-
-    add_log(status, "Found address of Module32FirstW: 0x" + int_to_hex(function_address), patch_status::LogLevel::INFO);
-
-    // Store the address for later undo
-    status.orig_bytes.module32_first_w_address = function_address;
-
-    // Check if already patched
-    if (is_process_patched(h_process, function_address, status)) {
-        add_log(status, "Module32FirstW already appears to be patched", patch_status::LogLevel::WARNING);
-        return 0; // Consider this a success, it's already patched
-    }
-
-    // Backup original bytes before patching
-    if (!backup_original_bytes(h_process, function_address, status.orig_bytes.module32_first_w_bytes, 7)) {
-        add_log(status, "Failed to backup original bytes before patching", patch_status::LogLevel::ERR);
-        return 1;
-    }
-
-    // Allocate memory in the target process
-    uintptr_t allocated_memory = allocate_memory_near_address(h_process, function_address, 0x1000);
-    if (!allocated_memory) {
-        add_log(status, "Could not allocate memory near target address", patch_status::LogLevel::ERR);
-        return 1;
-    }
-
-    add_log(status, "Allocated 1kb of memory at: 0x" + int_to_hex(allocated_memory), patch_status::LogLevel::INFO);
-
-    // Place payload at new memory location
-    if (!write_memory_with_protection_dynamic(h_process, allocated_memory,
-        {
-            0x48, 0x31, 0xC0,   // xor rax, rax
-            0xC3                // ret
-        })
-        ) {
-        add_log(status, "Could not write payload to allocated memory region", patch_status::LogLevel::ERR);
-        return 1;
-    }
-
-    add_log(status, "Payload written successfully to allocated memory region", patch_status::LogLevel::INFO);
-
-    // Assemble the JMP instruction
-    std::array<uint8_t, 5> jmp_instruction_bytes;
-    if (!assemble_jump_near_instruction(jmp_instruction_bytes.data(), function_address, allocated_memory)) {
-        add_log(status, "Allocated memory address is too far to assemble a jump near to", patch_status::LogLevel::ERR);
-        return 1;
-    }
-
-    add_log(status, "Assembled jump instruction: " + bytes_to_hex_string(jmp_instruction_bytes.data(), jmp_instruction_bytes.size()), patch_status::LogLevel::INFO);
-
-    // Write the JMP instruction (plus 2 nop's for the left over bytes)
-    std::array<uint8_t, 7> buffer;
-    std::copy(jmp_instruction_bytes.begin(), jmp_instruction_bytes.end(), buffer.begin());
-    buffer[5] = 0x90; // NOP instruction
-    buffer[6] = 0x90; // NOP instruction
-
-    if (!write_memory_with_protection(h_process, function_address, buffer.data(), buffer.size())) {
-        add_log(status, "Could not write jump instruction and NOP to target address", patch_status::LogLevel::ERR);
-        return 1;
-    }
-
-    add_log(status, "Placed hook at KERNEL32.Module32FirstW", patch_status::LogLevel::SUCCESS);
-
-    return 0;
-}
-
-int patch_kernel32_module32_next_w(HANDLE h_process, patch_status& status) {
-    // Get KERNEL32.DLL base address
-    uintptr_t module_base_address = get_remote_module_base_address(h_process, L"KERNEL32.DLL");
-    if (!module_base_address) {
-        add_log(status, "Could not get KERNEL32.DLL base address for Module32NextW", patch_status::LogLevel::ERR);
-        return 1;
-    }
-
-    add_log(status, "Found KERNEL32.DLL base address for Module32NextW: 0x" + int_to_hex(module_base_address), patch_status::LogLevel::INFO);
-
-    // Get the address of the target function
-    uintptr_t function_address = get_exported_function_address(h_process, module_base_address, L"KERNEL32.DLL", "Module32NextW");
-    if (!function_address) {
-        add_log(status, "Could not get remote address of Module32NextW", patch_status::LogLevel::ERR);
-        return 1;
-    }
-
-    add_log(status, "Found address of Module32NextW: 0x" + int_to_hex(function_address), patch_status::LogLevel::INFO);
-
-    // Store the address for later undo
-    status.orig_bytes.module32_next_w_address = function_address;
-
-    // Check if already patched
-    if (is_process_patched(h_process, function_address, status)) {
-        add_log(status, "Module32NextW already appears to be patched", patch_status::LogLevel::WARNING);
-        return 0;
-    }
-
-    // Backup original bytes before patching
-    if (!backup_original_bytes(h_process, function_address, status.orig_bytes.module32_next_w_bytes, 7)) {
-        add_log(status, "Failed to backup original bytes for Module32NextW", patch_status::LogLevel::ERR);
-        return 1;
-    }
-
-    // Allocate memory in the target process
-    uintptr_t allocated_memory = allocate_memory_near_address(h_process, function_address, 0x1000);
-    if (!allocated_memory) {
-        add_log(status, "Could not allocate memory near Module32NextW address", patch_status::LogLevel::ERR);
-        return 1;
-    }
-
-    add_log(status, "Allocated 1kb of memory for Module32NextW at: 0x" + int_to_hex(allocated_memory), patch_status::LogLevel::INFO);
-
-    // Place payload at new memory location
-    if (!write_memory_with_protection_dynamic(h_process, allocated_memory,
-        {
-            0x48, 0x31, 0xC0,   // xor rax, rax
-            0xC3                // ret
-        })
-        ) {
-        add_log(status, "Could not write Module32NextW payload to allocated memory region", patch_status::LogLevel::ERR);
-        return 1;
-    }
-
-    add_log(status, "Module32NextW payload written successfully", patch_status::LogLevel::INFO);
-
-    // Assemble the JMP instruction
-    std::array<uint8_t, 5> jmp_instruction_bytes;
-    if (!assemble_jump_near_instruction(jmp_instruction_bytes.data(), function_address, allocated_memory)) {
-        add_log(status, "Module32NextW allocated memory address is too far to assemble a jump near to", patch_status::LogLevel::ERR);
-        return 1;
-    }
-
-    // Write the JMP instruction (plus 2 nop's for the left over bytes)
-    std::array<uint8_t, 7> buffer;
-    std::copy(jmp_instruction_bytes.begin(), jmp_instruction_bytes.end(), buffer.begin());
-    buffer[5] = 0x90; // NOP instruction
-    buffer[6] = 0x90; // NOP instruction
-
-    if (!write_memory_with_protection(h_process, function_address, buffer.data(), buffer.size())) {
-        add_log(status, "Could not write Module32NextW jump instruction", patch_status::LogLevel::ERR);
-        return 1;
-    }
-
-    add_log(status, "Placed hook at KERNEL32.Module32NextW", patch_status::LogLevel::SUCCESS);
-    return 0;
-}
-
-int patch_user32_enum_windows(HANDLE h_process, patch_status& status) {
-    // Get USER32.dll base address
-    uintptr_t remote_user32_base = get_remote_module_base_address(h_process, L"USER32.dll");
-    if (!remote_user32_base) {
-        add_log(status, "Could not get USER32.dll base address for EnumWindows", patch_status::LogLevel::ERR);
-        return 1;
-    }
-
-    add_log(status, "Found USER32.dll base address for EnumWindows: 0x" + int_to_hex(remote_user32_base), patch_status::LogLevel::INFO);
-
-    // Get the address of the target function
-    uintptr_t remote_target_address = get_exported_function_address(h_process, remote_user32_base, L"USER32.dll", "EnumWindows");
-    if (!remote_target_address) {
-        add_log(status, "Could not get remote address of EnumWindows", patch_status::LogLevel::ERR);
-        return 1;
-    }
-
-    add_log(status, "Found address of EnumWindows: 0x" + int_to_hex(remote_target_address), patch_status::LogLevel::INFO);
-
-    // Store the address for later undo
-    status.orig_bytes.enum_windows_address = remote_target_address;
-
-    // Check if already patched
-    if (is_process_patched(h_process, remote_target_address, status)) {
-        add_log(status, "EnumWindows already appears to be patched", patch_status::LogLevel::WARNING);
-        return 0;
-    }
-
-    // Backup original bytes before patching
-    if (!backup_original_bytes(h_process, remote_target_address, status.orig_bytes.enum_windows_bytes, 6)) {
-        add_log(status, "Failed to backup original bytes for EnumWindows", patch_status::LogLevel::ERR);
-        return 1;
-    }
-
-    // Allocate memory in the target process
-    uintptr_t allocated_memory = allocate_memory_near_address(h_process, remote_target_address, 0x1000);
-    if (!allocated_memory) {
-        add_log(status, "Could not allocate memory near EnumWindows address", patch_status::LogLevel::ERR);
-        return 1;
-    }
-
-    add_log(status, "Allocated 1kb of memory for EnumWindows at: 0x" + int_to_hex(allocated_memory), patch_status::LogLevel::INFO);
-
-    // Place payload at new memory location - return TRUE (1) to indicate success
-    if (!write_memory_with_protection_dynamic(h_process, allocated_memory,
-        {
-            0x48, 0xC7, 0xC0, 0x01, 0x00, 0x00, 0x00,   // mov rax, 1
-            0xC3                                          // ret
-        })
-        ) {
-        add_log(status, "Could not write EnumWindows payload to allocated memory region", patch_status::LogLevel::ERR);
-        return 1;
-    }
-
-    add_log(status, "EnumWindows payload written successfully", patch_status::LogLevel::INFO);
-
-    // Assemble the JMP instruction
-    std::array<uint8_t, 5> jmp_instruction_bytes;
-    if (!assemble_jump_near_instruction(jmp_instruction_bytes.data(), remote_target_address, allocated_memory)) {
-        add_log(status, "EnumWindows allocated memory address is too far to assemble a jump near to", patch_status::LogLevel::ERR);
-        return 1;
-    }
-
-    // Write the JMP instruction (plus 1 nop for the left over byte)
-    std::array<uint8_t, 6> buffer;
-    std::copy(jmp_instruction_bytes.begin(), jmp_instruction_bytes.end(), buffer.begin());
-    buffer[5] = 0x90; // NOP instruction
-
-    if (!write_memory_with_protection(h_process, remote_target_address, buffer.data(), buffer.size())) {
-        add_log(status, "Could not write EnumWindows jump instruction", patch_status::LogLevel::ERR);
-        return 1;
-    }
-
-    add_log(status, "Placed hook at USER32.EnumWindows", patch_status::LogLevel::SUCCESS);
-    return 0;
-}
-
-int patch_user32_get_window_info(HANDLE h_process, patch_status& status) {
-    // Get USER32.dll base address
-    uintptr_t remote_user32_base = get_remote_module_base_address(h_process, L"USER32.dll");
-    if (!remote_user32_base) {
-        add_log(status, "Could not get USER32.dll base address for GetWindowInfo", patch_status::LogLevel::ERR);
-        return 1;
-    }
-
-    add_log(status, "Found USER32.dll base address for GetWindowInfo: 0x" + int_to_hex(remote_user32_base), patch_status::LogLevel::INFO);
-
-    // Get the address of the target function
-    uintptr_t remote_target_address = get_exported_function_address(h_process, remote_user32_base, L"USER32.dll", "GetWindowInfo");
-    if (!remote_target_address) {
-        add_log(status, "Could not get remote address of GetWindowInfo", patch_status::LogLevel::ERR);
-        return 1;
-    }
-
-    add_log(status, "Found address of GetWindowInfo: 0x" + int_to_hex(remote_target_address), patch_status::LogLevel::INFO);
-
-    // Store the address for later undo
-    status.orig_bytes.get_window_info_address = remote_target_address;
-
-    // Check if already patched
-    if (is_process_patched(h_process, remote_target_address, status)) {
-        add_log(status, "GetWindowInfo already appears to be patched", patch_status::LogLevel::WARNING);
-        return 0;
-    }
-
-    // Backup original bytes before patching
-    if (!backup_original_bytes(h_process, remote_target_address, status.orig_bytes.get_window_info_bytes, 6)) {
-        add_log(status, "Failed to backup original bytes for GetWindowInfo", patch_status::LogLevel::ERR);
-        return 1;
-    }
-
-    // Allocate memory in the target process
-    uintptr_t allocated_memory = allocate_memory_near_address(h_process, remote_target_address, 0x1000);
-    if (!allocated_memory) {
-        add_log(status, "Could not allocate memory near GetWindowInfo address", patch_status::LogLevel::ERR);
-        return 1;
-    }
-
-    add_log(status, "Allocated 1kb of memory for GetWindowInfo at: 0x" + int_to_hex(allocated_memory), patch_status::LogLevel::INFO);
-
-    // Place payload at new memory location - return TRUE (1) to indicate success
-    if (!write_memory_with_protection_dynamic(h_process, allocated_memory,
-        {
-            0x48, 0xC7, 0xC0, 0x01, 0x00, 0x00, 0x00,     // mov rax, 1
-            0xC3                                          // ret
-        })
-        ) {
-        add_log(status, "Could not write GetWindowInfo payload to allocated memory region", patch_status::LogLevel::ERR);
-        return 1;
-    }
-
-    add_log(status, "GetWindowInfo payload written successfully", patch_status::LogLevel::INFO);
-
-    // Assemble the JMP instruction
-    std::array<uint8_t, 5> jmp_instruction_bytes;
-    if (!assemble_jump_near_instruction(jmp_instruction_bytes.data(), remote_target_address, allocated_memory)) {
-        add_log(status, "GetWindowInfo allocated memory address is too far to assemble a jump near to", patch_status::LogLevel::ERR);
-        return 1;
-    }
-
-    // Write the JMP instruction (plus 1 nop for the left over byte)
-    std::array<uint8_t, 6> buffer;
-    std::copy(jmp_instruction_bytes.begin(), jmp_instruction_bytes.end(), buffer.begin());
-    buffer[5] = 0x90; // NOP instruction
-
-    if (!write_memory_with_protection(h_process, remote_target_address, buffer.data(), buffer.size())) {
-        add_log(status, "Could not write GetWindowInfo jump instruction", patch_status::LogLevel::ERR);
-        return 1;
-    }
-
-    add_log(status, "Placed hook at USER32.GetWindowInfo", patch_status::LogLevel::SUCCESS);
-    return 0;
-}
-
-int patch_k32_enum_process_modules(HANDLE h_process, patch_status& status) {
-    // Get KERNEL32.dll base address
-    uintptr_t remote_kernel32_base = get_remote_module_base_address(h_process, L"KERNEL32.dll");
-    if (!remote_kernel32_base) {
-        add_log(status, "Could not get KERNEL32.dll base address", patch_status::LogLevel::ERR);
-        return 1;
-    }
-
-    add_log(status, "Found KERNEL32.dll base address for K32EnumProcessModules: 0x" + int_to_hex(remote_kernel32_base), patch_status::LogLevel::INFO);
-
-    uintptr_t remote_target_address = get_exported_function_address(h_process, remote_kernel32_base, L"KERNEL32.dll", "K32EnumProcessModules");
-    if (!remote_target_address) {
-        add_log(status, "Could not get remote address of K32EnumProcessModules", patch_status::LogLevel::ERR);
-        return 1;
-    }
-
-    add_log(status, "Found address of K32EnumProcessModules: 0x" + int_to_hex(remote_target_address), patch_status::LogLevel::INFO);
-
-    status.orig_bytes.enum_modules_address = remote_target_address;
-    if (!backup_original_bytes(h_process, remote_target_address, status.orig_bytes.enum_modules_bytes, 6)) {
-        add_log(status, "Failed to backup original bytes before patching", patch_status::LogLevel::ERR);
-        return 1;
-    }
-
-    uintptr_t allocated_memory = allocate_memory_near_address(h_process, remote_target_address, 0x1000);
-    if (!allocated_memory) {
-        add_log(status, "Could not allocate memory near target address", patch_status::LogLevel::ERR);
-        return 1;
-    }
-
-    // SIMPLE PAYLOAD: Return FALSE for K32EnumProcessModules
-    if (!write_memory_with_protection_dynamic(h_process, allocated_memory,
-        {
-            // Check if the target process handle is for a browser process
-            // For simplicity, we'll just return FALSE for all enum attempts
-            0x31, 0xC0,                               // xor eax, eax (set return value to 0/FALSE)
-            0xC3                                      // ret (return immediately)
-        }))
-    {
-        add_log(status, "Could not write K32EnumProcessModules patch", patch_status::LogLevel::ERR);
-        return 1;
-    }
-
-    add_log(status, "K32EnumProcessModules payload written successfully", patch_status::LogLevel::INFO);
-
-    // Create and write the JMP instruction
-    std::array<uint8_t, 5> jmp_instruction_bytes;
-    if (!assemble_jump_near_instruction(jmp_instruction_bytes.data(), remote_target_address, allocated_memory)) {
-        add_log(status, "Could not assemble jump instruction", patch_status::LogLevel::ERR);
-        return 1;
-    }
-
-    std::array<uint8_t, 6> buffer;
-    std::copy(jmp_instruction_bytes.begin(), jmp_instruction_bytes.end(), buffer.begin());
-    buffer[5] = 0x90; // NOP
-
-    if (!write_memory_with_protection(h_process, remote_target_address, buffer.data(), buffer.size())) {
-        add_log(status, "Could not write jump instruction", patch_status::LogLevel::ERR);
-        return 1;
-    }
-
-    add_log(status, "Placed hook at KERNEL32.K32EnumProcessModules", patch_status::LogLevel::SUCCESS);
-    return 0;
-}
-
-// Function to undo patches
 bool undo_patches(patch_status& status, const std::string& config_path) {
     // Try to load patch info if not available in memory
     if (!status.undo_available && status.orig_bytes.process_id == 0) {
         if (!load_patch_info(status.orig_bytes, config_path)) {
-            add_log(status, "No patch information available to undo", patch_status::LogLevel::WARNING);
+            add_log(status, "No patch information available to undo", patch_status::log_level::WARNING);
             return false;
         }
     }
 
     // Check if the original process is still running
     if (!is_process_running(status.orig_bytes.process_id)) {
-        add_log(status, "Original patched process is no longer running", patch_status::LogLevel::WARNING);
+        add_log(status, "Original patched process is no longer running", patch_status::log_level::WARNING);
         delete_patch_info(config_path);
         status.undo_available = false;
         return false;
@@ -983,99 +638,42 @@ bool undo_patches(patch_status& status, const std::string& config_path) {
 
     HANDLE h_process = OpenProcess(PROCESS_ALL_ACCESS, FALSE, status.orig_bytes.process_id);
     if (!h_process) {
-        add_log(status, "Could not open process for undo operation", patch_status::LogLevel::ERR);
+        add_log(status, "Could not open process for undo operation", patch_status::log_level::ERR);
         return false;
     }
 
     bool success = true;
 
-    // Restore GetWindowDisplayAffinity
-    if (status.orig_bytes.wda_address != 0 && !status.orig_bytes.window_display_affinity_bytes.empty()) {
-        if (!restore_original_bytes(h_process, status.orig_bytes.wda_address, status.orig_bytes.window_display_affinity_bytes)) {
-            add_log(status, "Failed to restore GetWindowDisplayAffinity", patch_status::LogLevel::ERR);
-            success = false;
+    // Define a helper macro
+#define RESTORE_PATCH(func_name, display_name) \
+        if (status.orig_bytes.func_name##_address != 0 && !status.orig_bytes.func_name##_bytes.empty()) { \
+            if (!restore_original_bytes(h_process, status.orig_bytes.func_name##_address, status.orig_bytes.func_name##_bytes)) { \
+                add_log(status, "Failed to restore " display_name, patch_status::log_level::ERR); \
+                success = false; \
+            } else { \
+                add_log(status, "Successfully restored " display_name, patch_status::log_level::SUCCESS); \
+            } \
         }
-        else {
-            add_log(status, "Successfully restored GetWindowDisplayAffinity", patch_status::LogLevel::SUCCESS);
-        }
-    }
 
-    // Restore Process32FirstW
-    if (status.orig_bytes.process32_first_w_address != 0 && !status.orig_bytes.process32_first_w_bytes.empty()) {
-        if (!restore_original_bytes(h_process, status.orig_bytes.process32_first_w_address, status.orig_bytes.process32_first_w_bytes)) {
-            add_log(status, "Failed to restore Process32FirstW", patch_status::LogLevel::ERR);
-            success = false;
-        }
-        else {
-            add_log(status, "Successfully restored Process32FirstW", patch_status::LogLevel::SUCCESS);
-        }
-    }
+    // Restore common patches with proper names
+    RESTORE_PATCH(window_display_affinity, "GetWindowDisplayAffinity");
+    RESTORE_PATCH(process32_first_w, "Process32FirstW");
+    RESTORE_PATCH(process32_next_w, "Process32NextW");
+    RESTORE_PATCH(module32_first_w, "Module32FirstW");
+    RESTORE_PATCH(module32_next_w, "Module32NextW");
+    RESTORE_PATCH(enum_windows, "EnumWindows");
+    RESTORE_PATCH(get_window_info, "GetWindowInfo");
+    RESTORE_PATCH(enum_modules, "K32EnumProcessModules");
+    RESTORE_PATCH(get_module_handle_a, "GetModuleHandleA");
+    RESTORE_PATCH(get_module_handle_w, "GetModuleHandleW");
+    RESTORE_PATCH(get_module_handle_ex_a, "GetModuleHandleExA");
+    RESTORE_PATCH(get_module_handle_ex_w, "GetModuleHandleExW");
+    RESTORE_PATCH(get_module_filename_a, "GetModuleFileNameA");
+    RESTORE_PATCH(get_module_filename_w, "GetModuleFileNameW");
+    RESTORE_PATCH(k32_get_module_filename_ex_a, "K32GetModuleFileNameExA");
+    RESTORE_PATCH(k32_get_module_base_name_a, "K32GetModuleBaseNameA");
 
-    // Restore Process32NextW
-    if (status.orig_bytes.process32_next_w_address != 0 && !status.orig_bytes.process32_next_w_bytes.empty()) {
-        if (!restore_original_bytes(h_process, status.orig_bytes.process32_next_w_address, status.orig_bytes.process32_next_w_bytes)) {
-            add_log(status, "Failed to restore Process32NextW", patch_status::LogLevel::ERR);
-            success = false;
-        }
-        else {
-            add_log(status, "Successfully restored Process32NextW", patch_status::LogLevel::SUCCESS);
-        }
-    }
-
-    // Restore Module32FirstW
-    if (status.orig_bytes.module32_first_w_address != 0 && !status.orig_bytes.module32_first_w_bytes.empty()) {
-        if (!restore_original_bytes(h_process, status.orig_bytes.module32_first_w_address, status.orig_bytes.module32_first_w_bytes)) {
-            add_log(status, "Failed to restore Module32FirstW", patch_status::LogLevel::ERR);
-            success = false;
-        }
-        else {
-            add_log(status, "Successfully restored Module32FirstW", patch_status::LogLevel::SUCCESS);
-        }
-    }
-
-    // Restore Module32NextW
-    if (status.orig_bytes.module32_next_w_address != 0 && !status.orig_bytes.module32_next_w_bytes.empty()) {
-        if (!restore_original_bytes(h_process, status.orig_bytes.module32_next_w_address, status.orig_bytes.module32_next_w_bytes)) {
-            add_log(status, "Failed to restore Module32NextW", patch_status::LogLevel::ERR);
-            success = false;
-        }
-        else {
-            add_log(status, "Successfully restored Module32NextW", patch_status::LogLevel::SUCCESS);
-        }
-    }
-
-    // Restore EnumWindows
-    if (status.orig_bytes.enum_windows_address != 0 && !status.orig_bytes.enum_windows_bytes.empty()) {
-        if (!restore_original_bytes(h_process, status.orig_bytes.enum_windows_address, status.orig_bytes.enum_windows_bytes)) {
-            add_log(status, "Failed to restore EnumWindows", patch_status::LogLevel::ERR);
-            success = false;
-        }
-        else {
-            add_log(status, "Successfully restored EnumWindows", patch_status::LogLevel::SUCCESS);
-        }
-    }
-
-    // Restore GetWindowInfo
-    if (status.orig_bytes.get_window_info_address != 0 && !status.orig_bytes.get_window_info_bytes.empty()) {
-        if (!restore_original_bytes(h_process, status.orig_bytes.get_window_info_address, status.orig_bytes.get_window_info_bytes)) {
-            add_log(status, "Failed to restore GetWindowInfo", patch_status::LogLevel::ERR);
-            success = false;
-        }
-        else {
-            add_log(status, "Successfully restored GetWindowInfo", patch_status::LogLevel::SUCCESS);
-        }
-    }
-
-    // Restore K32EnumProcessModules
-    if (status.orig_bytes.enum_modules_address != 0 && !status.orig_bytes.enum_modules_bytes.empty()) {
-        if (!restore_original_bytes(h_process, status.orig_bytes.enum_modules_address, status.orig_bytes.enum_modules_bytes)) {
-            add_log(status, "Failed to restore K32EnumProcessModules", patch_status::LogLevel::ERR);
-            success = false;
-        }
-        else {
-            add_log(status, "Successfully restored K32EnumProcessModules", patch_status::LogLevel::SUCCESS);
-        }
-    }
+#undef RESTORE_PATCH
 
     CloseHandle(h_process);
 
@@ -1083,7 +681,7 @@ bool undo_patches(patch_status& status, const std::string& config_path) {
         status.undo_available = false;
         status.is_patched = false;
         delete_patch_info(config_path);
-        add_log(status, "All patches successfully reverted", patch_status::LogLevel::SUCCESS);
+        add_log(status, "All patches successfully reverted", patch_status::log_level::SUCCESS);
     }
 
     return success;
@@ -1136,93 +734,25 @@ void patching_thread(patch_status* status, const std::string& config_path) {
             DWORD nvcontainer_process_id = filtered_process_ids[0];
             status->target_process_id = nvcontainer_process_id;
             status->orig_bytes.process_id = nvcontainer_process_id;
-            add_log(*status, "Correct process found. PID: " + std::to_string(nvcontainer_process_id), patch_status::LogLevel::SUCCESS);
+            add_log(*status, "Correct process found. PID: " + std::to_string(nvcontainer_process_id), patch_status::log_level::SUCCESS);
 
             // Open the process
             HANDLE h_process = OpenProcess(PROCESS_ALL_ACCESS, FALSE, nvcontainer_process_id);
             if (!h_process) {
-                add_log(*status, "Could not open process", patch_status::LogLevel::ERR);
+                add_log(*status, "Could not open process", patch_status::log_level::ERR);
                 status->is_patched = false;
                 status->wait_for_process = true;
                 status->manual_patch_requested = false;
                 continue;
             }
 
-            // Apply patches
-            add_log(*status, "Starting to apply patches...", patch_status::LogLevel::INFO);
-            int error_code = patch_get_window_display_affinity(h_process, *status);
-            if (error_code) {
-                add_log(*status, "Something went wrong while applying the first patch", patch_status::LogLevel::ERR);
-                CloseHandle(h_process);
-                status->is_patched = false;
-                status->wait_for_process = true;
-                status->manual_patch_requested = false;
-                continue;
-            }
+            // Apply patches using the new unified system
+            add_log(*status, "Starting to apply patches...", patch_status::log_level::INFO);
 
-            error_code = patch_kernel32_process32_first_w(h_process, *status);
+            // Apply common patches (process/window enumeration)
+            int error_code = patch_common_functions(h_process, *status);
             if (error_code) {
-                add_log(*status, "Failed to apply Process32FirstW patch", patch_status::LogLevel::ERR);
-                CloseHandle(h_process);
-                status->is_patched = false;
-                status->wait_for_process = true;
-                status->manual_patch_requested = false;
-                continue;
-            }
-
-            error_code = patch_kernel32_process32_next_w(h_process, *status);
-            if (error_code) {
-                add_log(*status, "Failed to apply Process32NextW patch", patch_status::LogLevel::ERR);
-                CloseHandle(h_process);
-                status->is_patched = false;
-                status->wait_for_process = true;
-                status->manual_patch_requested = false;
-                continue;
-            }
-
-            error_code = patch_kernel32_module32_first_w(h_process, *status);
-            if (error_code) {
-                add_log(*status, "Something went wrong while applying the second patch", patch_status::LogLevel::ERR);
-                CloseHandle(h_process);
-                status->is_patched = false;
-                status->wait_for_process = true;
-                status->manual_patch_requested = false;
-                continue;
-            }
-
-            error_code = patch_kernel32_module32_next_w(h_process, *status);
-            if (error_code) {
-                add_log(*status, "Failed to apply Module32NextW patch", patch_status::LogLevel::ERR);
-                CloseHandle(h_process);
-                status->is_patched = false;
-                status->wait_for_process = true;
-                status->manual_patch_requested = false;
-                continue;
-            }
-
-            error_code = patch_user32_enum_windows(h_process, *status);
-            if (error_code) {
-                add_log(*status, "Failed to apply EnumWindows patch", patch_status::LogLevel::ERR);
-                CloseHandle(h_process);
-                status->is_patched = false;
-                status->wait_for_process = true;
-                status->manual_patch_requested = false;
-                continue;
-            }
-
-            error_code = patch_user32_get_window_info(h_process, *status);
-            if (error_code) {
-                add_log(*status, "Failed to apply GetWindowInfo patch", patch_status::LogLevel::ERR);
-                CloseHandle(h_process);
-                status->is_patched = false;
-                status->wait_for_process = true;
-                status->manual_patch_requested = false;
-                continue;
-            }
-
-            error_code = patch_k32_enum_process_modules(h_process, *status);
-            if (error_code) {
-                add_log(*status, "Failed to apply EnumProcessModules patch", patch_status::LogLevel::ERR);
+                add_log(*status, "Failed to apply patches", patch_status::log_level::ERR);
                 CloseHandle(h_process);
                 status->is_patched = false;
                 status->wait_for_process = true;
@@ -1235,7 +765,7 @@ void patching_thread(patch_status* status, const std::string& config_path) {
             // Save patch information for persistence
             save_patch_info(status->orig_bytes, config_path);
 
-            add_log(*status, "Patches finished!", patch_status::LogLevel::SUCCESS);
+            add_log(*status, "All patches applied successfully!", patch_status::log_level::SUCCESS);
             status->is_patched = true;
             status->undo_available = true;
             status->manual_patch_requested = false;
@@ -1386,11 +916,11 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPSTR lpCmdLine
             status.undo_available = true;
             status.is_patched = true;
             status.target_process_id = status.orig_bytes.process_id;
-            add_log(status, "Found existing patch information for process ID: " + std::to_string(status.orig_bytes.process_id), patch_status::LogLevel::INFO);
+            add_log(status, "Found existing patch information for process ID: " + std::to_string(status.orig_bytes.process_id), patch_status::log_level::INFO);
         }
         else {
             delete_patch_info(config_path);
-            add_log(status, "Found stale patch information - process no longer running", patch_status::LogLevel::WARNING);
+            add_log(status, "Found stale patch information - process no longer running", patch_status::log_level::WARNING);
         }
     }
 
@@ -1594,7 +1124,7 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPSTR lpCmdLine
         if (ImGui::Button("Patch Now", ImVec2(100, 30)) && !status.is_patched) {
             status.manual_patch_requested = true;
             status.wait_for_process = true;
-            add_log(status, "Manual patch requested", patch_status::LogLevel::INFO);
+            add_log(status, "Manual patch requested", patch_status::log_level::INFO);
         }
 
         ImGui::SameLine();
