@@ -1,7 +1,7 @@
 #include "utils.h"
 #include "memory.h"
 #include "config.h"
-#include "font.h"
+#include "font.h" // Exported font to C via HxD
 #include <ImGui/imgui.h>
 #include <ImGui/imgui_impl_dx11.h>
 #include <ImGui/imgui_impl_win32.h>
@@ -11,11 +11,15 @@
 #include <array>
 #include <string>
 #include <thread>
-#include <chrono>
-#include <Windows.h>
+#include <Windows.h> 
 #include <ctime>
 #include <fstream>
 #include <dwmapi.h>
+#include <shlobj.h>
+#include <filesystem>
+#include <shobjidl.h> 
+#include <objbase.h>
+#include <comdef.h>
 
 #pragma comment(lib, "d3d11.lib")
 #pragma comment(lib, "dwmapi.lib")
@@ -25,9 +29,13 @@
 #define COPYRIGHT_INFO \
 "Made by: nloginov\n" \
 "Concept: furyzenblade\n" \
-"Language: C++ | x64"
+"Language: C++ / x64\n\n" \
+"nlog.us/donate"
 
-#define VERSION "1.4.3"
+#define VERSION "1.4.4"
+
+// Namespaces
+namespace fs = std::filesystem;
 
 // Forward declarations
 extern IMGUI_IMPL_API LRESULT ImGui_ImplWin32_WndProcHandler(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam);
@@ -114,10 +122,13 @@ struct patch_status {
     bool is_running = true;
     bool is_patched = false;
     bool startup_enabled = false;
+    bool start_menu_enabled = false;
+    bool hide_log_window = false;
+    bool dark_mode = false;
     bool auto_close = false;
-    bool auto_patch = true;  // New: auto-patch option
+    bool auto_patch = true;
     bool undo_available = false;
-    bool manual_patch_requested = false;  // New: manual patch trigger
+    bool manual_patch_requested = false;
     DWORD target_process_id = 0;
     std::string status_message = "Ready - waiting for manual patch or auto-patch...";
     std::string detailed_log;
@@ -172,45 +183,124 @@ bool is_startup_enabled() {
     return exists;
 }
 
-void initialize_startup_status(patch_status& status, Config& config, const std::string& config_path) {
-    static bool initialized = false;
-    if (initialized) return;
-    initialized = true;
-
-    bool registry_enabled = is_startup_enabled();
-
-    // If registry is enabled but config doesn't match
-    if (registry_enabled && !config.startup_enabled) {
-        status.startup_enabled = true;
-        config.startup_enabled = true;
-        config.Save(config_path.c_str());
+// Function to get the Start Menu programs folder path
+std::string get_start_menu_programs_folder() {
+    char start_menu_path[MAX_PATH];
+    if (SUCCEEDED(SHGetFolderPathA(NULL, CSIDL_PROGRAMS, NULL, 0, start_menu_path))) {
+        return start_menu_path;
     }
-    // If registry is disabled but config says enabled
-    else if (!registry_enabled && config.startup_enabled) {
-        status.startup_enabled = false;
-        config.startup_enabled = false;
-        config.Save(config_path.c_str());
-    }
-    // Normal case - just sync the status
-    else {
-        status.startup_enabled = config.startup_enabled;
-    }
+    return "";
 }
 
-// Function to enable dark titlebar
-void enable_dark_titlebar(HWND hwnd) {
-    BOOL dark_mode = TRUE;
-    DwmSetWindowAttribute(hwnd, DWMWA_USE_IMMERSIVE_DARK_MODE, &dark_mode, sizeof(dark_mode)); // For Windows 10 version 1809 and later
+// Function to check if shortcut exists in Start Menu
+bool is_start_menu_enabled() {
+    auto start_menu = get_start_menu_programs_folder();
+    if (start_menu.empty()) return false;
 
-    // Alternative for older Windows 10 versions (before 1809)
-    // DwmSetWindowAttribute(hwnd, 19, &dark_mode, sizeof(dark_mode));
+    fs::path shortcut_path = fs::path(start_menu) / "NoShadowPlayBS.lnk";
+    return fs::exists(shortcut_path);
+}
 
-    // Enable blur behind for transparency effect
-    DWM_BLURBEHIND bb = {};
-    bb.dwFlags = DWM_BB_ENABLE | DWM_BB_BLURREGION;
-    bb.fEnable = TRUE;
-    bb.hRgnBlur = NULL; // NULL means entire window
-    DwmEnableBlurBehindWindow(hwnd, &bb);
+// Function to add/remove shortcut from Start Menu
+bool set_start_menu_shortcut(bool enable) {
+    // Initialize COM
+    CoInitialize(NULL);
+    bool result = false;
+
+    // Get executable path (wide char version)
+    WCHAR exe_path[MAX_PATH];
+    GetModuleFileNameW(NULL, exe_path, MAX_PATH);
+
+    // Get Start Menu Programs folder (wide char version)
+    WCHAR start_menu_path[MAX_PATH];
+    if (FAILED(SHGetFolderPathW(NULL, CSIDL_PROGRAMS, NULL, 0, start_menu_path))) {
+        CoUninitialize();
+        return false;
+    }
+
+    std::wstring shortcut_path = std::wstring(start_menu_path) + L"\\NoShadowPlayBS.lnk";
+
+    if (enable) {
+        // Create shortcut
+        IShellLinkW* psl = nullptr;
+        IPersistFile* ppf = nullptr;
+
+        if (SUCCEEDED(CoCreateInstance(CLSID_ShellLink, NULL, CLSCTX_INPROC_SERVER, IID_IShellLinkW, (LPVOID*)&psl))) {
+            psl->SetPath(exe_path);
+            psl->SetWorkingDirectory(std::filesystem::path(exe_path).parent_path().wstring().c_str());
+            psl->SetDescription(L"ShadowPlay Patcher - Remove Recording Restrictions");
+
+            if (SUCCEEDED(psl->QueryInterface(IID_IPersistFile, (void**)&ppf))) {
+                result = SUCCEEDED(ppf->Save(shortcut_path.c_str(), TRUE));
+                ppf->Release();
+            }
+            psl->Release();
+        }
+    }
+    else {
+        // Remove shortcut
+        try {
+            if (std::filesystem::exists(shortcut_path)) {
+                result = std::filesystem::remove(shortcut_path);
+            }
+            else {
+                result = true; // Doesn't exist counts as success
+            }
+        }
+        catch (...) {
+            result = false;
+        }
+    }
+
+    CoUninitialize();
+    return result;
+}
+
+// Function to detect Windows theme preference
+bool is_windows_dark_mode() {
+    HKEY hkey;
+    DWORD value = 0;
+    DWORD size = sizeof(value);
+
+    // Check system theme preference
+    if (RegOpenKeyExW(HKEY_CURRENT_USER,
+        L"Software\\Microsoft\\Windows\\CurrentVersion\\Themes\\Personalize",
+        0, KEY_READ, &hkey) == ERROR_SUCCESS) {
+
+        RegQueryValueExW(hkey, L"AppsUseLightTheme", NULL, NULL,
+            reinterpret_cast<LPBYTE>(&value), &size);
+        RegCloseKey(hkey);
+
+        return value == 0; // 0 = dark mode, 1 = light mode
+    }
+
+    return false; // Default to light mode if registry read fails
+}
+
+// Function to apply Windows-native titlebar styling
+void apply_native_titlebar_style(HWND hwnd, bool dark_mode) {
+    if (hwnd == NULL) return;
+
+    // Set dark/light titlebar for Windows 10 version 1809 and later
+    BOOL use_dark_mode = dark_mode ? TRUE : FALSE;
+
+    // Try the newer attribute first (Windows 10 version 1903+)
+    HRESULT hr = DwmSetWindowAttribute(hwnd, DWMWA_USE_IMMERSIVE_DARK_MODE,
+        &use_dark_mode, sizeof(use_dark_mode));
+
+    // Fall back to older attribute for Windows 10 version 1809-1903
+    if (FAILED(hr)) {
+        DwmSetWindowAttribute(hwnd, 19, &use_dark_mode, sizeof(use_dark_mode));
+    }
+
+    // Optional: Add subtle blur effect for modern appearance
+    if (dark_mode) {
+        DWM_BLURBEHIND bb = {};
+        bb.dwFlags = DWM_BB_ENABLE;
+        bb.fEnable = TRUE;
+        bb.hRgnBlur = NULL;
+        DwmEnableBlurBehindWindow(hwnd, &bb);
+    }
 }
 
 // Get current timestamp for logs
@@ -875,14 +965,15 @@ void patching_thread(patch_status* status, const std::string& config_path) {
     }
 }
 
-void apply_style() {
+void apply_style(bool dark_mode) {
     auto& style = ImGui::GetStyle();
+
+    // Layout settings
     style.WindowPadding = { 10.f, 10.f };
     style.PopupRounding = 3.f;
     style.FramePadding = { 8.f, 4.f };
     style.ItemSpacing = { 10.f, 8.f };
     style.ItemInnerSpacing = { 6.f, 6.f };
-    style.TouchExtraPadding = { 0.f, 0.f };
     style.IndentSpacing = 21.f;
     style.ScrollbarSize = 15.f;
     style.GrabMinSize = 8.f;
@@ -902,54 +993,54 @@ void apply_style() {
     style.DisplaySafeAreaPadding = { 3.f, 3.f };
 
     auto& colors = style.Colors;
-    colors[ImGuiCol_Text] = ImVec4(1.00f, 1.00f, 1.00f, 1.00f);
-    colors[ImGuiCol_TextDisabled] = ImVec4(1.00f, 0.90f, 0.19f, 1.00f);
-    colors[ImGuiCol_WindowBg] = ImVec4(0.06f, 0.06f, 0.06f, 1.00f);
-    colors[ImGuiCol_ChildBg] = ImVec4(0.00f, 0.00f, 0.00f, 0.00f);
-    colors[ImGuiCol_PopupBg] = ImVec4(0.08f, 0.08f, 0.08f, 0.94f);
-    colors[ImGuiCol_Border] = ImVec4(0.30f, 0.30f, 0.30f, 0.50f);
+
+    if (dark_mode) {
+        // Dark theme colors (original)
+        colors[ImGuiCol_Text] = ImVec4(1.00f, 1.00f, 1.00f, 1.00f);
+        colors[ImGuiCol_TextDisabled] = ImVec4(0.50f, 0.50f, 0.50f, 1.00f);
+        colors[ImGuiCol_WindowBg] = ImVec4(0.06f, 0.06f, 0.06f, 1.00f);
+        colors[ImGuiCol_PopupBg] = ImVec4(0.08f, 0.08f, 0.08f, 0.94f);
+        colors[ImGuiCol_FrameBg] = ImVec4(0.21f, 0.21f, 0.21f, 0.54f);
+        colors[ImGuiCol_FrameBgHovered] = ImVec4(0.21f, 0.21f, 0.21f, 0.78f);
+        colors[ImGuiCol_FrameBgActive] = ImVec4(0.28f, 0.27f, 0.27f, 0.54f);
+        colors[ImGuiCol_TitleBg] = ImVec4(0.17f, 0.17f, 0.17f, 1.00f);
+        colors[ImGuiCol_TitleBgActive] = ImVec4(0.19f, 0.19f, 0.19f, 1.00f);
+        colors[ImGuiCol_Button] = ImVec4(0.41f, 0.41f, 0.41f, 0.74f);
+        colors[ImGuiCol_ButtonHovered] = ImVec4(0.41f, 0.41f, 0.41f, 0.78f);
+        colors[ImGuiCol_ButtonActive] = ImVec4(0.41f, 0.41f, 0.41f, 0.87f);
+        colors[ImGuiCol_Border] = ImVec4(0.30f, 0.30f, 0.30f, 0.50f);
+        colors[ImGuiCol_CheckMark] = ImVec4(1.00f, 1.00f, 1.00f, 1.00f);
+        colors[ImGuiCol_SliderGrab] = ImVec4(0.34f, 0.34f, 0.34f, 1.00f);
+        colors[ImGuiCol_SliderGrabActive] = ImVec4(0.39f, 0.38f, 0.38f, 1.00f);
+        colors[ImGuiCol_Header] = ImVec4(0.37f, 0.37f, 0.37f, 0.31f);
+        colors[ImGuiCol_HeaderHovered] = ImVec4(0.38f, 0.38f, 0.38f, 0.37f);
+        colors[ImGuiCol_HeaderActive] = ImVec4(0.37f, 0.37f, 0.37f, 0.51f);
+    }
+    else {
+        // Light theme colors (improved with better checkboxes)
+        colors[ImGuiCol_Text] = ImVec4(0.15f, 0.15f, 0.15f, 1.00f);
+        colors[ImGuiCol_TextDisabled] = ImVec4(0.60f, 0.60f, 0.60f, 1.00f);
+        colors[ImGuiCol_WindowBg] = ImVec4(0.98f, 0.98f, 0.98f, 0.95f);
+        colors[ImGuiCol_PopupBg] = ImVec4(1.00f, 1.00f, 1.00f, 0.98f);
+        colors[ImGuiCol_FrameBg] = ImVec4(0.88f, 0.88f, 0.88f, 1.00f);
+        colors[ImGuiCol_FrameBgHovered] = ImVec4(0.82f, 0.82f, 0.82f, 1.00f);
+        colors[ImGuiCol_FrameBgActive] = ImVec4(0.76f, 0.76f, 0.76f, 1.00f);
+        colors[ImGuiCol_TitleBg] = ImVec4(0.92f, 0.92f, 0.92f, 1.00f);
+        colors[ImGuiCol_TitleBgActive] = ImVec4(0.88f, 0.88f, 0.88f, 1.00f);
+        colors[ImGuiCol_Button] = ImVec4(0.85f, 0.85f, 0.85f, 1.00f);
+        colors[ImGuiCol_ButtonHovered] = ImVec4(0.75f, 0.75f, 0.75f, 1.00f);
+        colors[ImGuiCol_ButtonActive] = ImVec4(0.65f, 0.65f, 0.65f, 1.00f);
+        colors[ImGuiCol_Border] = ImVec4(0.60f, 0.60f, 0.60f, 0.80f);
+        colors[ImGuiCol_CheckMark] = ImVec4(0.20f, 0.20f, 0.20f, 1.00f);
+        colors[ImGuiCol_SliderGrab] = ImVec4(0.55f, 0.55f, 0.55f, 1.00f);
+        colors[ImGuiCol_SliderGrabActive] = ImVec4(0.40f, 0.40f, 0.40f, 1.00f);
+        colors[ImGuiCol_Header] = ImVec4(0.78f, 0.78f, 0.78f, 0.31f);
+        colors[ImGuiCol_HeaderHovered] = ImVec4(0.72f, 0.72f, 0.72f, 0.37f);
+        colors[ImGuiCol_HeaderActive] = ImVec4(0.68f, 0.68f, 0.68f, 0.51f);
+    }
+
+    // Common colors
     colors[ImGuiCol_BorderShadow] = ImVec4(0.00f, 0.00f, 0.00f, 0.00f);
-    colors[ImGuiCol_FrameBg] = ImVec4(0.21f, 0.21f, 0.21f, 0.54f);
-    colors[ImGuiCol_FrameBgHovered] = ImVec4(0.21f, 0.21f, 0.21f, 0.78f);
-    colors[ImGuiCol_FrameBgActive] = ImVec4(0.28f, 0.27f, 0.27f, 0.54f);
-    colors[ImGuiCol_TitleBg] = ImVec4(0.17f, 0.17f, 0.17f, 1.00f);
-    colors[ImGuiCol_TitleBgActive] = ImVec4(0.19f, 0.19f, 0.19f, 1.00f);
-    colors[ImGuiCol_TitleBgCollapsed] = ImVec4(0.00f, 0.00f, 0.00f, 0.51f);
-    colors[ImGuiCol_MenuBarBg] = ImVec4(0.14f, 0.14f, 0.14f, 1.00f);
-    colors[ImGuiCol_ScrollbarBg] = ImVec4(0.02f, 0.02f, 0.02f, 0.53f);
-    colors[ImGuiCol_ScrollbarGrab] = ImVec4(0.31f, 0.31f, 0.31f, 1.00f);
-    colors[ImGuiCol_ScrollbarGrabHovered] = ImVec4(0.41f, 0.41f, 0.41f, 1.00f);
-    colors[ImGuiCol_ScrollbarGrabActive] = ImVec4(0.51f, 0.51f, 0.51f, 1.00f);
-    colors[ImGuiCol_CheckMark] = ImVec4(1.00f, 1.00f, 1.00f, 1.00f);
-    colors[ImGuiCol_SliderGrab] = ImVec4(0.34f, 0.34f, 0.34f, 1.00f);
-    colors[ImGuiCol_SliderGrabActive] = ImVec4(0.39f, 0.38f, 0.38f, 1.00f);
-    colors[ImGuiCol_Button] = ImVec4(0.41f, 0.41f, 0.41f, 0.74f);
-    colors[ImGuiCol_ButtonHovered] = ImVec4(0.41f, 0.41f, 0.41f, 0.78f);
-    colors[ImGuiCol_ButtonActive] = ImVec4(0.41f, 0.41f, 0.41f, 0.87f);
-    colors[ImGuiCol_Header] = ImVec4(0.37f, 0.37f, 0.37f, 0.31f);
-    colors[ImGuiCol_HeaderHovered] = ImVec4(0.38f, 0.38f, 0.38f, 0.37f);
-    colors[ImGuiCol_HeaderActive] = ImVec4(0.37f, 0.37f, 0.37f, 0.51f);
-    colors[ImGuiCol_Separator] = ImVec4(0.38f, 0.38f, 0.38f, 0.50f);
-    colors[ImGuiCol_SeparatorHovered] = ImVec4(0.46f, 0.46f, 0.46f, 0.50f);
-    colors[ImGuiCol_SeparatorActive] = ImVec4(0.46f, 0.46f, 0.46f, 0.64f);
-    colors[ImGuiCol_ResizeGrip] = ImVec4(0.26f, 0.26f, 0.26f, 1.00f);
-    colors[ImGuiCol_ResizeGripHovered] = ImVec4(0.31f, 0.31f, 0.31f, 1.00f);
-    colors[ImGuiCol_ResizeGripActive] = ImVec4(0.35f, 0.35f, 0.35f, 1.00f);
-    colors[ImGuiCol_Tab] = ImVec4(0.21f, 0.21f, 0.21f, 0.86f);
-    colors[ImGuiCol_TabHovered] = ImVec4(0.27f, 0.27f, 0.27f, 0.86f);
-    colors[ImGuiCol_TabActive] = ImVec4(0.34f, 0.34f, 0.34f, 0.86f);
-    colors[ImGuiCol_TabUnfocused] = ImVec4(0.10f, 0.10f, 0.10f, 0.97f);
-    colors[ImGuiCol_TabUnfocusedActive] = ImVec4(0.15f, 0.15f, 0.15f, 1.00f);
-    colors[ImGuiCol_PlotLines] = ImVec4(0.61f, 0.61f, 0.61f, 1.00f);
-    colors[ImGuiCol_PlotLinesHovered] = ImVec4(1.00f, 0.43f, 0.35f, 1.00f);
-    colors[ImGuiCol_PlotHistogram] = ImVec4(0.90f, 0.70f, 0.00f, 1.00f);
-    colors[ImGuiCol_PlotHistogramHovered] = ImVec4(1.00f, 0.60f, 0.00f, 1.00f);
-    colors[ImGuiCol_TextSelectedBg] = ImVec4(0.26f, 0.59f, 0.98f, 0.35f);
-    colors[ImGuiCol_DragDropTarget] = ImVec4(1.00f, 1.00f, 0.00f, 0.90f);
-    colors[ImGuiCol_NavHighlight] = ImVec4(0.26f, 0.59f, 0.98f, 1.00f);
-    colors[ImGuiCol_NavWindowingHighlight] = ImVec4(1.00f, 1.00f, 1.00f, 0.70f);
-    colors[ImGuiCol_NavWindowingDimBg] = ImVec4(0.80f, 0.80f, 0.80f, 0.20f);
-    colors[ImGuiCol_ModalWindowDimBg] = ImVec4(0.80f, 0.80f, 0.80f, 0.35f);
 }
 
 std::string get_config_path() {
@@ -962,7 +1053,7 @@ std::string get_config_path() {
         std::string dir(path);
         size_t pos = dir.find_last_of("\\/");
         std::string exe_dir = (pos != std::string::npos) ? dir.substr(0, pos + 1) : "";
-        return exe_dir + "config.ini";
+        return exe_dir + DEFAULT_CONFIG_FILENAME;
     }
 
     std::string appdata_path(path);
@@ -976,7 +1067,23 @@ std::string get_config_path() {
     appdata_path += "NoShadowPlayBS\\";
     CreateDirectoryA(appdata_path.c_str(), NULL);
 
-    return appdata_path + "config.ini";
+    return appdata_path + DEFAULT_CONFIG_FILENAME;
+}
+
+// Initialize or repair settings that affect Windows
+void init_autostart_settings(Config& config, patch_status& status, const std::string& config_path) {
+    auto sync_setting = [&](auto& config_setting, auto actual_state) {
+        if (config_setting != actual_state) {
+            config_setting = actual_state;
+            config.Save(config_path.c_str());
+        }
+        };
+
+    sync_setting(config.startup_enabled, is_startup_enabled());
+    sync_setting(config.start_menu_enabled, is_start_menu_enabled());
+
+    status.startup_enabled = config.startup_enabled;
+    status.start_menu_enabled = config.start_menu_enabled;
 }
 
 // WinMain - the Windows entry point
@@ -984,6 +1091,8 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPSTR lpCmdLine
 {
     // Path
     std::string config_path = get_config_path();
+
+    // Directory
     size_t pos = config_path.find_last_of("\\/");
     std::string config_dir = (pos != std::string::npos) ? config_path.substr(0, pos + 1) : "";
 
@@ -991,19 +1100,17 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPSTR lpCmdLine
     Config config;
     config.Load(config_path.c_str());
 
-    // Check registry first to get actual startup state
-    bool actual_startup_state = is_startup_enabled();
-
-    // If config doesn't match registry, update config
-    if (config.startup_enabled != actual_startup_state) {
-        config.startup_enabled = actual_startup_state;
-        config.Save(config_path.c_str());
-    }
-
+    // Initialize status from config
     patch_status status;
     status.startup_enabled = config.startup_enabled;
+    status.start_menu_enabled = config.start_menu_enabled;
+    status.hide_log_window = config.hide_log_window;
+    status.dark_mode = config.dark_mode;
     status.auto_close = config.auto_close;
     status.auto_patch = config.auto_patch;
+
+    // Verify actual states of startup/start_menu and update config if needed
+    init_autostart_settings(config, status, config_path);
 
     // Check for existing patch info
     if (load_patch_info(status.orig_bytes, config_path)) {
@@ -1045,12 +1152,12 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPSTR lpCmdLine
     RegisterClassEx(&wc);
     HWND hwnd = CreateWindow(wc.lpszClassName, _T("NVIDIA Patcher"),
         WS_OVERLAPPEDWINDOW, // Now resizable and movable
-        100, 100, 700, 500, NULL, NULL, wc.hInstance, NULL);
+        100, 100, 700, 550, NULL, NULL, wc.hInstance, NULL);
 
     LoadIcon(hInstance, MAKEINTRESOURCE(IDI_ICON1));
 
     // Apply dark theme BEFORE showing the window
-    enable_dark_titlebar(hwnd);
+    apply_native_titlebar_style(hwnd, status.dark_mode);
 
     // Initialize Direct3D
     if (!create_device_d3d(hwnd, &g_device, &g_device_context, &g_swap_chain))
@@ -1073,7 +1180,7 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPSTR lpCmdLine
     io.IniFilename = imgui_path.c_str();
 
     // Setup style
-    apply_style();
+    apply_style(status.dark_mode);
 
     // Setup Platform/Renderer backends
     ImGui_ImplWin32_Init(hwnd);
@@ -1154,7 +1261,7 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPSTR lpCmdLine
             ImGui::TextColored(ImVec4(0.0f, 0.75f, 1.0f, 1.0f), "Patching...");
 
             if (ImGui::IsItemHovered())
-                ImGui::SetTooltip("Make sure Instant Replay is enabled in the NVIDIA App");
+                ImGui::SetTooltip("Make sure Instant Replay is enabled in the NVIDIA Overlay");
         }
         else if (status.wait_for_process && status.auto_patch) {
             ImGui::TextColored(ImVec4(1.0f, 0.65f, 0.1f, 1.0f), "Waiting for NVIDIA process...");
@@ -1200,9 +1307,9 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPSTR lpCmdLine
         ImGui::EndChild();
 
         // Settings checkboxes
-        ImGui::BeginChild("ControlsPanel", ImVec2(0, 80), true);
+        ImGui::BeginChild("ControlsPanel", ImVec2(0, 115), true);
 
-        if (ImGui::Checkbox("Auto-patch on launch", &status.auto_patch))
+        if (ImGui::Checkbox("Auto-Patch on Launch", &status.auto_patch))
         {
             config.auto_patch = status.auto_patch;
             config.Save(config_path.c_str());
@@ -1213,7 +1320,7 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPSTR lpCmdLine
 
         ImGui::SameLine();
 
-        if (ImGui::Checkbox("Auto-close after patching", &status.auto_close))
+        if (ImGui::Checkbox("Auto-Close After Patching", &status.auto_close))
         {
             config.auto_close = status.auto_close;
             config.Save(config_path.c_str());
@@ -1224,7 +1331,7 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPSTR lpCmdLine
 
         ImGui::SameLine();
         
-        if (ImGui::Checkbox("Run at Windows startup", &status.startup_enabled))
+        if (ImGui::Checkbox("Run at Windows Startup", &status.startup_enabled))
         {
             config.startup_enabled = status.startup_enabled;
             config.Save(config_path.c_str());
@@ -1233,6 +1340,40 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPSTR lpCmdLine
 
         if (ImGui::IsItemHovered())
             ImGui::SetTooltip("This will make the program automatically run at Windows startup");
+
+        if (ImGui::Checkbox("Add to Start Menu", &status.start_menu_enabled))
+        {
+            config.start_menu_enabled = status.start_menu_enabled;
+            config.Save(config_path.c_str());
+            set_start_menu_shortcut(status.start_menu_enabled);
+        }
+
+        if (ImGui::IsItemHovered())
+            ImGui::SetTooltip("This will add a shortcut to the program in your Start Menu");
+
+        ImGui::SameLine();
+
+        if (ImGui::Checkbox("Hide Log Window", &status.hide_log_window))
+        {
+            config.hide_log_window = status.hide_log_window;
+            config.Save(config_path.c_str());
+        }
+
+        if (ImGui::IsItemHovered())
+            ImGui::SetTooltip("This will hide the 'Detailed Log' region from the GUI");
+
+        ImGui::SameLine();
+
+        if (ImGui::Checkbox("Enable Dark Theme", &status.dark_mode))
+        {
+            config.dark_mode = status.dark_mode;
+            config.Save(config_path.c_str());
+            apply_native_titlebar_style(hwnd, status.dark_mode);
+            apply_style(status.dark_mode);
+        }
+
+        if (ImGui::IsItemHovered())
+            ImGui::SetTooltip("This will change the theme look of the program");
 
         // Main action buttons
         if (ImGui::Button("Patch Now", ImVec2(100, 30)) && !status.is_patched) {
@@ -1257,30 +1398,34 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPSTR lpCmdLine
 
         ImGui::EndChild();
 
-        // Log display with title
-        ImGui::Text("Detailed Log:");
-        ImGui::BeginChild("LogRegion", ImVec2(0, 0), true,
-            ImGuiWindowFlags_HorizontalScrollbar |
-            ImGuiWindowFlags_AlwaysVerticalScrollbar);
-
-        // Display placeholder when empty
-        if (status.detailed_log.empty()) {
-            ImGui::Text("Log is empty - patch activity will appear here");
-        }
-        else {
-            // Display log text
-            ImGui::PushTextWrapPos(0.0f); // Enable text wrapping
-            ImGui::TextUnformatted(status.detailed_log.c_str());
-            ImGui::PopTextWrapPos();
-        }
-
-        // Auto-scroll to keep up with new log entries
-        if (ImGui::GetScrollY() >= ImGui::GetScrollMaxY() - 20)
+        // Show logs based on the user's choice
+        if (!status.hide_log_window)
         {
-            ImGui::SetScrollHereY(1.0f);
-        }
+            // Log display with title
+            ImGui::Text("Detailed Log:");
+            ImGui::BeginChild("LogRegion", ImVec2(0, 0), true,
+                ImGuiWindowFlags_HorizontalScrollbar |
+                ImGuiWindowFlags_AlwaysVerticalScrollbar);
 
-        ImGui::EndChild();
+            // Display placeholder when empty
+            if (status.detailed_log.empty()) {
+                ImGui::Text("Log is empty - patch activity will appear here");
+            }
+            else {
+                // Display log text
+                ImGui::PushTextWrapPos(0.0f); // Enable text wrapping
+                ImGui::TextUnformatted(status.detailed_log.c_str());
+                ImGui::PopTextWrapPos();
+            }
+
+            // Auto-scroll to keep up with new log entries
+            if (ImGui::GetScrollY() >= ImGui::GetScrollMaxY() - 20)
+            {
+                ImGui::SetScrollHereY(1.0f);
+            }
+
+            ImGui::EndChild();
+        }
 
         ImGui::End();
 
