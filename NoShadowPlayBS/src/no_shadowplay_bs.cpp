@@ -23,7 +23,7 @@
 
 // Copyright information
 #define COPYRIGHT_INFO "Made by nloginov,\nResearch by furyzenblade"
-#define VERSION "1.4.1"
+#define VERSION "1.4.2"
 
 // Forward declarations
 extern IMGUI_IMPL_API LRESULT ImGui_ImplWin32_WndProcHandler(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam);
@@ -423,12 +423,84 @@ bool restore_original_bytes(HANDLE h_process, uintptr_t target_address, const st
     return write_memory_with_protection(h_process, target_address, original_bytes.data(), original_bytes.size());
 }
 
+// Helper function to convert wide string to narrow string
+std::string wstring_to_string(const std::wstring& wstr) {
+    if (wstr.empty()) return std::string();
+    int size_needed = WideCharToMultiByte(CP_UTF8, 0, &wstr[0], (int)wstr.size(), NULL, 0, NULL, NULL);
+    std::string str(size_needed, 0);
+    WideCharToMultiByte(CP_UTF8, 0, &wstr[0], (int)wstr.size(), &str[0], size_needed, NULL, NULL);
+    return str;
+}
+
+// Helper function to convert wchar_t* to string
+std::string wchar_to_string(const wchar_t* wstr) {
+    return wstring_to_string(std::wstring(wstr));
+}
+
+// Function to force load a DLL in the target process
+bool force_load_dll_in_process(HANDLE h_process, const wchar_t* dll_name) {
+    // Get LoadLibraryW address from kernel32.dll
+    HMODULE kernel32 = GetModuleHandleW(L"kernel32.dll");
+    if (!kernel32) return false;
+
+    FARPROC load_library_w = GetProcAddress(kernel32, "LoadLibraryW");
+    if (!load_library_w) return false;
+
+    // Allocate memory for the DLL name in target process
+    size_t dll_name_size = (wcslen(dll_name) + 1) * sizeof(wchar_t);
+    void* remote_dll_name = VirtualAllocEx(h_process, NULL, dll_name_size, MEM_COMMIT | MEM_RESERVE, PAGE_READWRITE);
+    if (!remote_dll_name) return false;
+
+    // Write DLL name to target process
+    if (!WriteProcessMemory(h_process, remote_dll_name, dll_name, dll_name_size, NULL)) {
+        VirtualFreeEx(h_process, remote_dll_name, 0, MEM_RELEASE);
+        return false;
+    }
+
+    // Create remote thread to call LoadLibraryW
+    HANDLE thread = CreateRemoteThread(h_process, NULL, 0, (LPTHREAD_START_ROUTINE)load_library_w, remote_dll_name, 0, NULL);
+    if (!thread) {
+        VirtualFreeEx(h_process, remote_dll_name, 0, MEM_RELEASE);
+        return false;
+    }
+
+    // Wait for the thread to complete
+    WaitForSingleObject(thread, INFINITE);
+
+    // Get the return value (HMODULE)
+    DWORD exit_code = 0;
+    GetExitCodeThread(thread, &exit_code);
+
+    // Cleanup
+    CloseHandle(thread);
+    VirtualFreeEx(h_process, remote_dll_name, 0, MEM_RELEASE);
+
+    return exit_code != 0; // LoadLibraryW returns NULL on failure
+}
+
 int apply_patch(HANDLE h_process, patch_status& status, const patch_config& config) {
-    // Get module base address
+    // Check if DLL is already loaded
     uintptr_t module_base = get_remote_module_base_address(h_process, config.module_name);
+
     if (!module_base) {
-        add_log(status, std::string("Could not get module base address for ") + config.function_name, patch_status::log_level::ERR);
-        return 1;
+        // DLL not loaded, force load it
+        add_log(status, std::string("DLL not loaded, attempting to force load ") + wchar_to_string(config.module_name), patch_status::log_level::INFO);
+        if (!force_load_dll_in_process(h_process, config.module_name)) {
+            add_log(status, std::string("Could not force load ") + wchar_to_string(config.module_name), patch_status::log_level::ERR);
+            return 1;
+        }
+
+        // Small delay to ensure DLL is fully loaded
+        Sleep(100);
+
+        // Check again after force loading
+        module_base = get_remote_module_base_address(h_process, config.module_name);
+        if (!module_base) {
+            add_log(status, std::string("DLL still not loaded after force load attempt"), patch_status::log_level::ERR);
+            return 1;
+        }
+
+        add_log(status, std::string("Successfully force loaded ") + wchar_to_string(config.module_name), patch_status::log_level::SUCCESS);
     }
 
     // Get function address
