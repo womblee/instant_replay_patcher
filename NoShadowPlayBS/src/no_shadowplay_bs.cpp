@@ -22,8 +22,12 @@
 #define IDI_ICON1 101
 
 // Copyright information
-#define COPYRIGHT_INFO "Made by nloginov,\nResearch by furyzenblade"
-#define VERSION "1.4.2"
+#define COPYRIGHT_INFO \
+"Made by: nloginov\n" \
+"Concept: furyzenblade\n" \
+"Language: C++ | x64"
+
+#define VERSION "1.4.3"
 
 // Forward declarations
 extern IMGUI_IMPL_API LRESULT ImGui_ImplWin32_WndProcHandler(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam);
@@ -426,9 +430,11 @@ bool restore_original_bytes(HANDLE h_process, uintptr_t target_address, const st
 // Helper function to convert wide string to narrow string
 std::string wstring_to_string(const std::wstring& wstr) {
     if (wstr.empty()) return std::string();
+
     int size_needed = WideCharToMultiByte(CP_UTF8, 0, &wstr[0], (int)wstr.size(), NULL, 0, NULL, NULL);
     std::string str(size_needed, 0);
     WideCharToMultiByte(CP_UTF8, 0, &wstr[0], (int)wstr.size(), &str[0], size_needed, NULL, NULL);
+
     return str;
 }
 
@@ -1061,7 +1067,6 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPSTR lpCmdLine
     // Setup ImGui context
     ImGui::CreateContext();
     ImGuiIO& io = ImGui::GetIO(); (void)io;
-    io.ConfigFlags |= ImGuiConfigFlags_NavEnableKeyboard; // Enable keyboard controls
 
     // Write the imgui.ini to the program's directory
     std::string imgui_path = config_dir + "imgui.ini";
@@ -1118,6 +1123,9 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPSTR lpCmdLine
         // Header with version and status
         ImGui::Text("NVIDIA Patcher v%s", VERSION);
 
+        if (ImGui::IsItemHovered())
+            ImGui::SetTooltip("This tool is intended for educational and security research purposes only.");
+
         // Copyright tooltip indicator
         ImGui::SameLine(ImGui::GetWindowWidth() - 25); // Right-align
         ImGui::TextColored(ImVec4(0.6f, 0.6f, 0.6f, 0.7f), "(?)");
@@ -1144,13 +1152,21 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPSTR lpCmdLine
         }
         else if (status.manual_patch_requested) {
             ImGui::TextColored(ImVec4(0.0f, 0.75f, 1.0f, 1.0f), "Patching...");
+
+            if (ImGui::IsItemHovered())
+                ImGui::SetTooltip("Make sure Instant Replay is enabled in the NVIDIA App");
         }
-        else if (status.wait_for_process) {
-            ImGui::TextColored(ImVec4(1.0f, 0.65f, 0.1f, 1.0f),
-                status.auto_patch ? "Waiting for NVIDIA process..." : "Ready to patch");
+        else if (status.wait_for_process && status.auto_patch) {
+            ImGui::TextColored(ImVec4(1.0f, 0.65f, 0.1f, 1.0f), "Waiting for NVIDIA process...");
         }
         else {
-            ImGui::TextColored(ImVec4(1.0f, 0.0f, 0.0f, 1.0f), status.status_message.c_str());
+            // Ready state - only show error if there was one
+            if (!status.status_message.empty() && status.status_message.find("Failed") != std::string::npos) {
+                ImGui::TextColored(ImVec4(1.0f, 0.0f, 0.0f, 1.0f), status.status_message.c_str());
+            }
+            else {
+                ImGui::TextColored(ImVec4(0.7f, 0.7f, 0.7f, 1.0f), "Ready");
+            }
         }
 
         // Process status section (more technical details)
@@ -1192,6 +1208,9 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPSTR lpCmdLine
             config.Save(config_path.c_str());
         }
 
+        if (ImGui::IsItemHovered())
+            ImGui::SetTooltip("This will automatically start the patching process once the program is opened");
+
         ImGui::SameLine();
 
         if (ImGui::Checkbox("Auto-close after patching", &status.auto_close))
@@ -1199,6 +1218,9 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPSTR lpCmdLine
             config.auto_close = status.auto_close;
             config.Save(config_path.c_str());
         }
+
+        if (ImGui::IsItemHovered())
+            ImGui::SetTooltip("This will automatically close the program when patching is finished");
 
         ImGui::SameLine();
         
@@ -1208,6 +1230,9 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPSTR lpCmdLine
             config.Save(config_path.c_str());
             set_startup(status.startup_enabled);
         }
+
+        if (ImGui::IsItemHovered())
+            ImGui::SetTooltip("This will make the program automatically run at Windows startup");
 
         // Main action buttons
         if (ImGui::Button("Patch Now", ImVec2(100, 30)) && !status.is_patched) {
