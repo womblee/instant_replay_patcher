@@ -32,7 +32,7 @@
 "Language: C++ / x64\n\n" \
 "nlog.us/donate"
 
-#define VERSION "1.4.4"
+#define VERSION "1.4.5"
 
 // Namespaces
 namespace fs = std::filesystem;
@@ -80,6 +80,9 @@ struct original_bytes {
     std::vector<uint8_t> k32_get_module_filename_ex_a_bytes;
     std::vector<uint8_t> k32_get_module_base_name_a_bytes;
 
+    // Signature-based patches
+    std::vector<uint8_t> nvd3dumx_signature_bytes;
+
     // Address fields
     uintptr_t open_process_address = 0;
     uintptr_t process32_first_w_address = 0;
@@ -101,23 +104,93 @@ struct original_bytes {
     uintptr_t k32_get_module_filename_ex_a_address = 0;
     uintptr_t k32_get_module_base_name_a_address = 0;
 
+    // Signature-based addresses
+    uintptr_t nvd3dumx_signature_address = 0;
+
     DWORD process_id = 0;
 };
 
 enum class patch_type {
     RETURN_FALSE,
     RETURN_TRUE,
-    WDA_NONE_
+    WDA_NONE_,
+    CUSTOM_PATCH
+};
+
+enum class patch_method {
+    EXPORTED_FUNCTION,
+    SIGNATURE_SCAN
+};
+
+struct signature_info {
+    std::vector<uint8_t> pattern;
+    std::vector<bool> mask;  // true = match byte, false = wildcard
+    std::string ida_style;   // For display purposes
+
+    signature_info() = default;
+    signature_info(const std::string& ida_sig) : ida_style(ida_sig) {
+        parse_ida_signature(ida_sig);
+    }
+
+    void parse_ida_signature(const std::string& ida_sig) {
+        pattern.clear();
+        mask.clear();
+
+        std::istringstream iss(ida_sig);
+        std::string token;
+
+        while (iss >> token) {
+            if (token == "??" || token == "?") {
+                pattern.push_back(0x00);
+                mask.push_back(false);  // wildcard
+            }
+            else if (token.length() == 2) {
+                try {
+                    uint8_t byte = static_cast<uint8_t>(std::stoul(token, nullptr, 16));
+                    pattern.push_back(byte);
+                    mask.push_back(true);  // match this byte
+                }
+                catch (const std::exception&) {
+                    // Invalid hex, treat as wildcard
+                    pattern.push_back(0x00);
+                    mask.push_back(false);
+                }
+            }
+        }
+    }
 };
 
 struct patch_config {
     const char* function_name;
     const wchar_t* module_name;
-    patch_type patch_type;
+    patch_method method;
+    patch_type type;
     std::vector<uint8_t> patch_bytes;
     std::vector<uint8_t>* backup_bytes;
     uintptr_t* address_field;
     size_t patch_size;
+
+    // Signature-specific fields
+    signature_info signature;
+    std::string display_name;  // For logging
+
+    // Constructor for exported functions (existing)
+    patch_config(const char* func_name, const wchar_t* mod_name, patch_type p_type,
+        std::vector<uint8_t> p_bytes, std::vector<uint8_t>* backup,
+        uintptr_t* addr_field, size_t p_size)
+        : function_name(func_name), module_name(mod_name), method(patch_method::EXPORTED_FUNCTION),
+        type(p_type), patch_bytes(std::move(p_bytes)), backup_bytes(backup),
+        address_field(addr_field), patch_size(p_size), display_name(func_name) {
+    }
+
+    // Constructor for signature-based patches
+    patch_config(const std::string& name, const wchar_t* mod_name, const std::string& sig,
+        patch_type p_type, std::vector<uint8_t> p_bytes, std::vector<uint8_t>* backup,
+        uintptr_t* addr_field, size_t p_size)
+        : function_name(nullptr), module_name(mod_name), method(patch_method::SIGNATURE_SCAN),
+        type(p_type), patch_bytes(std::move(p_bytes)), backup_bytes(backup),
+        address_field(addr_field), patch_size(p_size), signature(sig), display_name(name) {
+    }
 };
 
 // Patch status tracking with improved logging
@@ -307,6 +380,22 @@ void apply_native_titlebar_style(HWND hwnd, bool dark_mode) {
     }
 }
 
+// Helper function to convert wide string to narrow string
+std::string wstring_to_string(const std::wstring& wstr) {
+    if (wstr.empty()) return std::string();
+
+    int size_needed = WideCharToMultiByte(CP_UTF8, 0, &wstr[0], (int)wstr.size(), NULL, 0, NULL, NULL);
+    std::string str(size_needed, 0);
+    WideCharToMultiByte(CP_UTF8, 0, &wstr[0], (int)wstr.size(), &str[0], size_needed, NULL, NULL);
+
+    return str;
+}
+
+// Helper function to convert wchar_t* to string
+std::string wchar_to_string(const wchar_t* wstr) {
+    return wstring_to_string(std::wstring(wstr));
+}
+
 // Get current timestamp for logs
 std::string get_timestamp() {
     auto now = std::chrono::system_clock::now();
@@ -375,6 +464,7 @@ void save_patch_info(const original_bytes& orig_bytes, const std::string& config
     file.write(reinterpret_cast<const char*>(&orig_bytes.get_module_filename_w_address), sizeof(orig_bytes.get_module_filename_w_address));
     file.write(reinterpret_cast<const char*>(&orig_bytes.k32_get_module_filename_ex_a_address), sizeof(orig_bytes.k32_get_module_filename_ex_a_address));
     file.write(reinterpret_cast<const char*>(&orig_bytes.k32_get_module_base_name_a_address), sizeof(orig_bytes.k32_get_module_base_name_a_address));
+    file.write(reinterpret_cast<const char*>(&orig_bytes.nvd3dumx_signature_address), sizeof(orig_bytes.nvd3dumx_signature_address));
 
     // Helper lambda to write byte vectors
     auto write_bytes = [&file](const std::vector<uint8_t>& bytes) {
@@ -405,6 +495,7 @@ void save_patch_info(const original_bytes& orig_bytes, const std::string& config
     write_bytes(orig_bytes.get_module_filename_w_bytes);
     write_bytes(orig_bytes.k32_get_module_filename_ex_a_bytes);
     write_bytes(orig_bytes.k32_get_module_base_name_a_bytes);
+    write_bytes(orig_bytes.nvd3dumx_signature_bytes);
 
     file.close();
 }
@@ -440,6 +531,7 @@ bool load_patch_info(original_bytes& orig_bytes, const std::string& config_path)
         file.read(reinterpret_cast<char*>(&orig_bytes.get_module_filename_w_address), sizeof(orig_bytes.get_module_filename_w_address));
         file.read(reinterpret_cast<char*>(&orig_bytes.k32_get_module_filename_ex_a_address), sizeof(orig_bytes.k32_get_module_filename_ex_a_address));
         file.read(reinterpret_cast<char*>(&orig_bytes.k32_get_module_base_name_a_address), sizeof(orig_bytes.k32_get_module_base_name_a_address));
+        file.read(reinterpret_cast<char*>(&orig_bytes.nvd3dumx_signature_address), sizeof(orig_bytes.nvd3dumx_signature_address));
 
         // Helper lambda to read byte vectors
         auto read_bytes = [&file](std::vector<uint8_t>& bytes) {
@@ -471,6 +563,7 @@ bool load_patch_info(original_bytes& orig_bytes, const std::string& config_path)
         read_bytes(orig_bytes.get_module_filename_w_bytes);
         read_bytes(orig_bytes.k32_get_module_filename_ex_a_bytes);
         read_bytes(orig_bytes.k32_get_module_base_name_a_bytes);
+        read_bytes(orig_bytes.nvd3dumx_signature_bytes);
 
         file.close();
         return true;
@@ -485,6 +578,87 @@ bool load_patch_info(original_bytes& orig_bytes, const std::string& config_path)
 void delete_patch_info(const std::string& config_path) {
     std::string patch_info_path = config_path.substr(0, config_path.find_last_of('.')) + "_patches.dat";
     DeleteFileA(patch_info_path.c_str());
+}
+
+// Signature scanning functions
+uintptr_t find_pattern_in_module(HANDLE h_process, uintptr_t module_base, size_t module_size,
+    const signature_info& sig, patch_status& status) {
+    if (sig.pattern.empty()) {
+        add_log(status, "Empty signature pattern", patch_status::log_level::ERR);
+        return 0;
+    }
+
+    // Read module memory in chunks
+    const size_t chunk_size = 64 * 1024;  // 64KB chunks
+    std::vector<uint8_t> buffer(chunk_size);
+
+    for (size_t offset = 0; offset < module_size; offset += chunk_size - sig.pattern.size()) {
+        size_t read_size = min(chunk_size, module_size - offset);
+        SIZE_T bytes_read = 0;
+
+        if (!ReadProcessMemory(h_process, (LPCVOID)(module_base + offset),
+            buffer.data(), read_size, &bytes_read) || bytes_read == 0) {
+            continue;
+        }
+
+        // Search for pattern in this chunk
+        for (size_t i = 0; i <= bytes_read - sig.pattern.size(); ++i) {
+            bool match = true;
+            for (size_t j = 0; j < sig.pattern.size(); ++j) {
+                if (sig.mask[j] && buffer[i + j] != sig.pattern[j]) {
+                    match = false;
+                    break;
+                }
+            }
+
+            if (match) {
+                uintptr_t found_address = module_base + offset + i;
+                return found_address;
+            }
+        }
+    }
+
+    return 0;  // Pattern not found
+}
+
+uintptr_t get_module_size(HANDLE h_process, uintptr_t module_base) {
+    IMAGE_DOS_HEADER dos_header;
+    IMAGE_NT_HEADERS nt_headers;
+    SIZE_T bytes_read;
+
+    // Read DOS header
+    if (!ReadProcessMemory(h_process, (LPCVOID)module_base, &dos_header,
+        sizeof(dos_header), &bytes_read)) {
+        return 0;
+    }
+
+    // Read NT headers
+    if (!ReadProcessMemory(h_process, (LPCVOID)(module_base + dos_header.e_lfanew),
+        &nt_headers, sizeof(nt_headers), &bytes_read)) {
+        return 0;
+    }
+
+    return nt_headers.OptionalHeader.SizeOfImage;
+}
+
+uintptr_t find_signature_in_module(HANDLE h_process, const wchar_t* module_name,
+    const signature_info& sig, patch_status& status) {
+    // Get module base address
+    uintptr_t module_base = get_remote_module_base_address(h_process, module_name);
+    if (!module_base) {
+        add_log(status, std::string("Could not find module: ") + wchar_to_string(module_name),
+            patch_status::log_level::ERR);
+        return 0;
+    }
+
+    // Get module size
+    size_t module_size = get_module_size(h_process, module_base);
+    if (!module_size) {
+        add_log(status, "Could not get module size", patch_status::log_level::ERR);
+        return 0;
+    }
+
+    return find_pattern_in_module(h_process, module_base, module_size, sig, status);
 }
 
 // Check if process is still running
@@ -529,22 +703,6 @@ bool restore_original_bytes(HANDLE h_process, uintptr_t target_address, const st
     return write_memory_with_protection(h_process, target_address, original_bytes.data(), original_bytes.size());
 }
 
-// Helper function to convert wide string to narrow string
-std::string wstring_to_string(const std::wstring& wstr) {
-    if (wstr.empty()) return std::string();
-
-    int size_needed = WideCharToMultiByte(CP_UTF8, 0, &wstr[0], (int)wstr.size(), NULL, 0, NULL, NULL);
-    std::string str(size_needed, 0);
-    WideCharToMultiByte(CP_UTF8, 0, &wstr[0], (int)wstr.size(), &str[0], size_needed, NULL, NULL);
-
-    return str;
-}
-
-// Helper function to convert wchar_t* to string
-std::string wchar_to_string(const wchar_t* wstr) {
-    return wstring_to_string(std::wstring(wstr));
-}
-
 // Function to force load a DLL in the target process
 bool force_load_dll_in_process(HANDLE h_process, const wchar_t* dll_name) {
     // Get LoadLibraryW address from kernel32.dll
@@ -587,234 +745,235 @@ bool force_load_dll_in_process(HANDLE h_process, const wchar_t* dll_name) {
 }
 
 int apply_patch(HANDLE h_process, patch_status& status, const patch_config& config) {
-    // Check if DLL is already loaded
-    uintptr_t module_base = get_remote_module_base_address(h_process, config.module_name);
+    uintptr_t target_address = 0;
 
-    if (!module_base) {
-        // DLL not loaded, force load it
-        add_log(status, std::string("DLL not loaded, attempting to force load ") + wchar_to_string(config.module_name), patch_status::log_level::INFO);
-        if (!force_load_dll_in_process(h_process, config.module_name)) {
-            add_log(status, std::string("Could not force load ") + wchar_to_string(config.module_name), patch_status::log_level::ERR);
-            return 1;
-        }
+    if (config.method == patch_method::EXPORTED_FUNCTION) {
+        // Original exported function logic
+        uintptr_t module_base = get_remote_module_base_address(h_process, config.module_name);
 
-        // Small delay to ensure DLL is fully loaded
-        Sleep(100);
-
-        // Check again after force loading
-        module_base = get_remote_module_base_address(h_process, config.module_name);
         if (!module_base) {
-            add_log(status, std::string("DLL still not loaded after force load attempt"), patch_status::log_level::ERR);
+            add_log(status, std::string("DLL not loaded, attempting to force load ") +
+                wchar_to_string(config.module_name), patch_status::log_level::INFO);
+            if (!force_load_dll_in_process(h_process, config.module_name)) {
+                add_log(status, std::string("Could not force load ") +
+                    wchar_to_string(config.module_name), patch_status::log_level::ERR);
+                return 1;
+            }
+
+            Sleep(100);
+            module_base = get_remote_module_base_address(h_process, config.module_name);
+            if (!module_base) {
+                add_log(status, "DLL still not loaded after force load attempt",
+                    patch_status::log_level::ERR);
+                return 1;
+            }
+        }
+
+        target_address = get_exported_function_address(h_process, module_base,
+            config.module_name, config.function_name);
+
+        if (!target_address) {
+            add_log(status, std::string("Could not get address of ") + config.function_name,
+                patch_status::log_level::ERR);
             return 1;
         }
 
-        add_log(status, std::string("Successfully force loaded ") + wchar_to_string(config.module_name), patch_status::log_level::SUCCESS);
     }
+    else if (config.method == patch_method::SIGNATURE_SCAN) {
+        // Signature scanning logic
+        target_address = find_signature_in_module(h_process, config.module_name,
+            config.signature, status);
 
-    // Get function address
-    uintptr_t func_addr = get_exported_function_address(h_process, module_base, config.module_name, config.function_name);
-    if (!func_addr) {
-        add_log(status, std::string("Could not get address of ") + config.function_name, patch_status::log_level::ERR);
-        return 1;
+        if (!target_address) {
+            add_log(status, "Could not find signature for " + config.display_name,
+                patch_status::log_level::ERR);
+            return 1;
+        }
     }
 
     // Store address for undo
-    *(config.address_field) = func_addr;
+    *(config.address_field) = target_address;
 
     // Check if already patched
-    if (is_process_patched(h_process, func_addr, status)) {
-        add_log(status, std::string(config.function_name) + " already appears to be patched", patch_status::log_level::WARNING);
+    if (is_process_patched(h_process, target_address, status)) {
+        add_log(status, config.display_name + " already appears to be patched",
+            patch_status::log_level::WARNING);
         return 0;
     }
 
     // Backup original bytes
     config.backup_bytes->resize(config.patch_size);
-    if (!backup_original_bytes(h_process, func_addr, *config.backup_bytes, config.patch_size)) {
-        add_log(status, std::string("Failed to backup ") + config.function_name, patch_status::log_level::ERR);
+    if (!backup_original_bytes(h_process, target_address, *config.backup_bytes, config.patch_size)) {
+        add_log(status, "Failed to backup " + config.display_name, patch_status::log_level::ERR);
         return 1;
     }
 
-    // Allocate memory for patch
-    uintptr_t allocated_memory = allocate_memory_near_address(h_process, func_addr, 0x1000);
+    // For custom patches, write directly
+    if (config.type == patch_type::CUSTOM_PATCH) {
+        if (config.patch_bytes.size() > config.patch_size) {
+            add_log(status, "Patch bytes too large for " + config.display_name,
+                patch_status::log_level::ERR);
+            return 1;
+        }
+
+        std::vector<uint8_t> final_patch = config.patch_bytes;
+        final_patch.resize(config.patch_size, 0x90); // Fill with NOPs
+
+        if (!write_memory_with_protection(h_process, target_address,
+            final_patch.data(), final_patch.size())) {
+            add_log(status, "Could not write custom patch for " + config.display_name,
+                patch_status::log_level::ERR);
+            return 1;
+        }
+
+        add_log(status, "Patched " + config.display_name,
+            patch_status::log_level::SUCCESS);
+
+        return 0;
+    }
+
+    // Original jump-based patching logic for other patch types
+    uintptr_t allocated_memory = allocate_memory_near_address(h_process, target_address, 0x1000);
     if (!allocated_memory) {
-        add_log(status, std::string("Could not allocate memory near ") + config.function_name, patch_status::log_level::ERR);
+        add_log(status, "Could not allocate memory near " + config.display_name,
+            patch_status::log_level::ERR);
         return 1;
     }
 
-    // Write the payload
     if (!write_memory_with_protection_dynamic(h_process, allocated_memory, config.patch_bytes)) {
-        add_log(status, std::string("Could not write payload for ") + config.function_name, patch_status::log_level::ERR);
+        add_log(status, "Could not write payload for " + config.display_name,
+            patch_status::log_level::ERR);
         return 1;
     }
 
-    // Create and write jump instruction
     std::array<uint8_t, 5> jmp_instruction;
-    if (!assemble_jump_near_instruction(jmp_instruction.data(), func_addr, allocated_memory)) {
-        add_log(status, std::string("Jump too far for ") + config.function_name, patch_status::log_level::ERR);
+    if (!assemble_jump_near_instruction(jmp_instruction.data(), target_address, allocated_memory)) {
+        add_log(status, "Jump too far for " + config.display_name, patch_status::log_level::ERR);
         return 1;
     }
 
-    // Prepare final patch (jmp + nops)
     std::vector<uint8_t> final_patch(jmp_instruction.begin(), jmp_instruction.end());
-    final_patch.resize(config.patch_size, 0x90); // Fill rest with NOPs
+    final_patch.resize(config.patch_size, 0x90);
 
-    if (!write_memory_with_protection(h_process, func_addr, final_patch.data(), final_patch.size())) {
-        add_log(status, std::string("Could not write final patch for ") + config.function_name, patch_status::log_level::ERR);
+    if (!write_memory_with_protection(h_process, target_address,
+        final_patch.data(), final_patch.size())) {
+        add_log(status, "Could not write final patch for " + config.display_name,
+            patch_status::log_level::ERR);
         return 1;
     }
 
-    add_log(status, std::string("Patched ") + config.function_name, patch_status::log_level::SUCCESS);
-
+    add_log(status, "Patched " + config.display_name, patch_status::log_level::SUCCESS);
     return 0;
 }
 
 std::vector<patch_config> get_patch_configs(patch_status& status) {
-    return {
-        // Process opening patches
-        {
-            "OpenProcess", L"KERNEL32.dll", patch_type::RETURN_FALSE,
-            {0x48, 0x31, 0xC0, 0xC3}, // xor rax, rax; ret (returns HANDLE)
-            &status.orig_bytes.open_process_bytes,
-            &status.orig_bytes.open_process_address,
-            12
-        },
+    std::vector<patch_config> configs;
 
-        // Process enumeration patches
-        {
-            "Process32FirstW", L"KERNEL32.DLL", patch_type::RETURN_FALSE,
-            {0x33, 0xC0, 0xC3}, // xor eax, eax; ret (returns BOOL)
-            &status.orig_bytes.process32_first_w_bytes,
-            &status.orig_bytes.process32_first_w_address,
-            7
-        },
-        {
-            "Process32NextW", L"KERNEL32.DLL", patch_type::RETURN_FALSE,
-            {0x33, 0xC0, 0xC3}, // xor eax, eax; ret
-            &status.orig_bytes.process32_next_w_bytes,
-            &status.orig_bytes.process32_next_w_address,
-            7
-        },
+    // Original exported function patches
+    configs.emplace_back("OpenProcess", L"KERNEL32.dll", patch_type::RETURN_FALSE,
+        std::vector<uint8_t>{0x48, 0x31, 0xC0, 0xC3},
+        & status.orig_bytes.open_process_bytes,
+        & status.orig_bytes.open_process_address, 12);
 
-        // Module enumeration patches
-        {
-            "Module32FirstW", L"KERNEL32.DLL", patch_type::RETURN_FALSE,
-            {0x33, 0xC0, 0xC3}, // xor eax, eax; ret
-            &status.orig_bytes.module32_first_w_bytes,
-            &status.orig_bytes.module32_first_w_address,
-            7
-        },
-        {
-            "Module32NextW", L"KERNEL32.DLL", patch_type::RETURN_FALSE,
-            {0x33, 0xC0, 0xC3}, // xor eax, eax; ret
-            &status.orig_bytes.module32_next_w_bytes,
-            &status.orig_bytes.module32_next_w_address,
-            7
-        },
-        {
-            "K32EnumProcessModules", L"KERNEL32.dll", patch_type::RETURN_FALSE,
-            {0x33, 0xC0, 0xC3}, // xor eax, eax; ret (returns BOOL)
-            &status.orig_bytes.enum_modules_bytes,
-            &status.orig_bytes.enum_modules_address,
-            6
-        },
+    configs.emplace_back("Process32FirstW", L"KERNEL32.DLL", patch_type::RETURN_FALSE,
+        std::vector<uint8_t>{0x33, 0xC0, 0xC3},
+        & status.orig_bytes.process32_first_w_bytes,
+        & status.orig_bytes.process32_first_w_address, 7);
 
-        // Window enumeration patches
-        {
-            "EnumWindows", L"USER32.dll", patch_type::RETURN_TRUE,
-            {0x48, 0xC7, 0xC0, 0x01, 0x00, 0x00, 0x00, 0xC3}, // mov rax, 1; ret
-            &status.orig_bytes.enum_windows_bytes,
-            &status.orig_bytes.enum_windows_address,
-            6
-        },
-        {
-            "GetWindowInfo", L"USER32.dll", patch_type::RETURN_TRUE,
-            {0x48, 0xC7, 0xC0, 0x01, 0x00, 0x00, 0x00, 0xC3}, // mov rax, 1; ret
-            &status.orig_bytes.get_window_info_bytes,
-            &status.orig_bytes.get_window_info_address,
-            6
-        },
+    configs.emplace_back("Process32NextW", L"KERNEL32.DLL", patch_type::RETURN_FALSE,
+        std::vector<uint8_t>{0x33, 0xC0, 0xC3},
+        & status.orig_bytes.process32_next_w_bytes,
+        & status.orig_bytes.process32_next_w_address, 7);
 
-        // Special case for GetWindowDisplayAffinity
-        {
-            "GetWindowDisplayAffinity", L"USER32.dll", patch_type::WDA_NONE_,
-            {0x48, 0x85, 0xD2, 0x74, 0x06, 0xC7, 0x02, 0x00, 0x00, 0x00, 0x00, 0xB8, 0x01, 0x00, 0x00, 0x00, 0xC3},
-            &status.orig_bytes.window_display_affinity_bytes,
-            &status.orig_bytes.window_display_affinity_address,
-            6
-        },
+    configs.emplace_back("Module32FirstW", L"KERNEL32.DLL", patch_type::RETURN_FALSE,
+        std::vector<uint8_t>{0x33, 0xC0, 0xC3},
+        & status.orig_bytes.module32_first_w_bytes,
+        & status.orig_bytes.module32_first_w_address, 7);
 
-        // Module handle/name patches
-        {
-            "GetFileVersionInfoA", L"VERSION.dll", patch_type::RETURN_FALSE,
-            {0x33, 0xC0, 0xC3}, // xor eax, eax; ret (returns BOOL)
-            &status.orig_bytes.get_file_version_info_a_bytes,
-            &status.orig_bytes.get_file_version_info_a_address,
-            6
-        },
-        {
-            "GetFileVersionInfoSizeA", L"VERSION.dll", patch_type::RETURN_FALSE,
-            {0x33, 0xC0, 0xC3}, // xor eax, eax; ret (returns UINT)
-            &status.orig_bytes.get_file_version_info_size_a_bytes,
-            &status.orig_bytes.get_file_version_info_size_a_address,
-            6
-        },
-        {
-            "GetModuleHandleA", L"KERNEL32.dll", patch_type::RETURN_FALSE,
-            {0x48, 0x31, 0xC0, 0xC3}, // xor rax, rax; ret (returns HMODULE)
-            &status.orig_bytes.get_module_handle_a_bytes,
-            &status.orig_bytes.get_module_handle_a_address,
-            6
-        },
-        {
-            "GetModuleHandleW", L"KERNEL32.dll", patch_type::RETURN_FALSE,
-            {0x48, 0x31, 0xC0, 0xC3},
-            &status.orig_bytes.get_module_handle_w_bytes,
-            &status.orig_bytes.get_module_handle_w_address,
-            6
-        },
-        {
-            "GetModuleHandleExA", L"KERNEL32.dll", patch_type::RETURN_FALSE,
-            {0x33, 0xC0, 0xC3}, // returns BOOL, not HMODULE
-            &status.orig_bytes.get_module_handle_ex_a_bytes,
-            &status.orig_bytes.get_module_handle_ex_a_address,
-            6
-        },
-        {
-            "GetModuleHandleExW", L"KERNEL32.dll", patch_type::RETURN_FALSE,
-            {0x33, 0xC0, 0xC3}, // returns BOOL
-            &status.orig_bytes.get_module_handle_ex_w_bytes,
-            &status.orig_bytes.get_module_handle_ex_w_address,
-            6
-        },
-        {
-            "GetModuleFileNameA", L"KERNEL32.dll", patch_type::RETURN_FALSE,
-            {0x33, 0xC0, 0xC3}, // returns DWORD
-            &status.orig_bytes.get_module_filename_a_bytes,
-            &status.orig_bytes.get_module_filename_a_address,
-            6
-        },
-        {
-            "GetModuleFileNameW", L"KERNEL32.dll", patch_type::RETURN_FALSE,
-            {0x33, 0xC0, 0xC3},
-            &status.orig_bytes.get_module_filename_w_bytes,
-            &status.orig_bytes.get_module_filename_w_address,
-            6
-        },
-        {
-            "K32GetModuleFileNameExA", L"KERNEL32.dll", patch_type::RETURN_FALSE,
-            {0x33, 0xC0, 0xC3}, // returns DWORD
-            &status.orig_bytes.k32_get_module_filename_ex_a_bytes,
-            &status.orig_bytes.k32_get_module_filename_ex_a_address,
-            6
-        },
-        {
-            "K32GetModuleBaseNameA", L"KERNEL32.dll", patch_type::RETURN_FALSE,
-            {0x33, 0xC0, 0xC3}, // returns DWORD
-            &status.orig_bytes.k32_get_module_base_name_a_bytes,
-            &status.orig_bytes.k32_get_module_base_name_a_address,
-            6
-        }
-    };
+    configs.emplace_back("Module32NextW", L"KERNEL32.DLL", patch_type::RETURN_FALSE,
+        std::vector<uint8_t>{0x33, 0xC0, 0xC3},
+        & status.orig_bytes.module32_next_w_bytes,
+        & status.orig_bytes.module32_next_w_address, 7);
+
+    configs.emplace_back("K32EnumProcessModules", L"KERNEL32.dll", patch_type::RETURN_FALSE,
+        std::vector<uint8_t>{0x33, 0xC0, 0xC3},
+        & status.orig_bytes.enum_modules_bytes,
+        & status.orig_bytes.enum_modules_address, 6);
+
+    configs.emplace_back("EnumWindows", L"USER32.dll", patch_type::RETURN_TRUE,
+        std::vector<uint8_t>{0x48, 0xC7, 0xC0, 0x01, 0x00, 0x00, 0x00, 0xC3},
+        & status.orig_bytes.enum_windows_bytes,
+        & status.orig_bytes.enum_windows_address, 6);
+
+    configs.emplace_back("GetWindowInfo", L"USER32.dll", patch_type::RETURN_TRUE,
+        std::vector<uint8_t>{0x48, 0xC7, 0xC0, 0x01, 0x00, 0x00, 0x00, 0xC3},
+        & status.orig_bytes.get_window_info_bytes,
+        & status.orig_bytes.get_window_info_address, 6);
+
+    configs.emplace_back("GetWindowDisplayAffinity", L"USER32.dll", patch_type::WDA_NONE_,
+        std::vector<uint8_t>{0x48, 0x85, 0xD2, 0x74, 0x06, 0xC7, 0x02, 0x00, 0x00, 0x00, 0x00, 0xB8, 0x01, 0x00, 0x00, 0x00, 0xC3},
+        & status.orig_bytes.window_display_affinity_bytes,
+        & status.orig_bytes.window_display_affinity_address, 6);
+
+    configs.emplace_back("GetFileVersionInfoA", L"VERSION.dll", patch_type::RETURN_FALSE,
+        std::vector<uint8_t>{0x33, 0xC0, 0xC3},
+        & status.orig_bytes.get_file_version_info_a_bytes,
+        & status.orig_bytes.get_file_version_info_a_address, 6);
+
+    configs.emplace_back("GetFileVersionInfoSizeA", L"VERSION.dll", patch_type::RETURN_FALSE,
+        std::vector<uint8_t>{0x33, 0xC0, 0xC3},
+        & status.orig_bytes.get_file_version_info_size_a_bytes,
+        & status.orig_bytes.get_file_version_info_size_a_address, 6);
+
+    configs.emplace_back("GetModuleHandleA", L"KERNEL32.dll", patch_type::RETURN_FALSE,
+        std::vector<uint8_t>{0x48, 0x31, 0xC0, 0xC3},
+        & status.orig_bytes.get_module_handle_a_bytes,
+        & status.orig_bytes.get_module_handle_a_address, 6);
+
+    configs.emplace_back("GetModuleHandleW", L"KERNEL32.dll", patch_type::RETURN_FALSE,
+        std::vector<uint8_t>{0x48, 0x31, 0xC0, 0xC3},
+        & status.orig_bytes.get_module_handle_w_bytes,
+        & status.orig_bytes.get_module_handle_w_address, 6);
+
+    configs.emplace_back("GetModuleHandleExA", L"KERNEL32.dll", patch_type::RETURN_FALSE,
+        std::vector<uint8_t>{0x33, 0xC0, 0xC3},
+        & status.orig_bytes.get_module_handle_ex_a_bytes,
+        & status.orig_bytes.get_module_handle_ex_a_address, 6);
+
+    configs.emplace_back("GetModuleHandleExW", L"KERNEL32.dll", patch_type::RETURN_FALSE,
+        std::vector<uint8_t>{0x33, 0xC0, 0xC3},
+        & status.orig_bytes.get_module_handle_ex_w_bytes,
+        & status.orig_bytes.get_module_handle_ex_w_address, 6);
+
+    configs.emplace_back("GetModuleFileNameA", L"KERNEL32.dll", patch_type::RETURN_FALSE,
+        std::vector<uint8_t>{0x33, 0xC0, 0xC3},
+        & status.orig_bytes.get_module_filename_a_bytes,
+        & status.orig_bytes.get_module_filename_a_address, 6);
+
+    configs.emplace_back("GetModuleFileNameW", L"KERNEL32.dll", patch_type::RETURN_FALSE,
+        std::vector<uint8_t>{0x33, 0xC0, 0xC3},
+        & status.orig_bytes.get_module_filename_w_bytes,
+        & status.orig_bytes.get_module_filename_w_address, 6);
+
+    configs.emplace_back("K32GetModuleFileNameExA", L"KERNEL32.dll", patch_type::RETURN_FALSE,
+        std::vector<uint8_t>{0x33, 0xC0, 0xC3},
+        & status.orig_bytes.k32_get_module_filename_ex_a_bytes,
+        & status.orig_bytes.k32_get_module_filename_ex_a_address, 6);
+
+    configs.emplace_back("K32GetModuleBaseNameA", L"KERNEL32.dll", patch_type::RETURN_FALSE,
+        std::vector<uint8_t>{0x33, 0xC0, 0xC3},
+        & status.orig_bytes.k32_get_module_base_name_a_bytes,
+        & status.orig_bytes.k32_get_module_base_name_a_address, 6);
+
+    // You can find this by loading nvd3dumx.dll in IDA and searching for 'chrome.exe' or 'firefox.exe'
+    configs.emplace_back("NvD3DUmx_BrowserDetect", L"nvd3dumx.dll",
+        "4C 8B DC 55 53 49 8D AB 68 FF",
+        patch_type::CUSTOM_PATCH,
+        std::vector<uint8_t>{0xC3}, // Simple RET instruction
+        & status.orig_bytes.nvd3dumx_signature_bytes,
+        & status.orig_bytes.nvd3dumx_signature_address, 10);
+
+    return configs;
 }
 
 int patch_common_functions(HANDLE h_process, patch_status& status) {
@@ -886,6 +1045,7 @@ bool undo_patches(patch_status& status, const std::string& config_path) {
     RESTORE_PATCH(get_module_filename_w, "GetModuleFileNameW");
     RESTORE_PATCH(k32_get_module_filename_ex_a, "K32GetModuleFileNameExA");
     RESTORE_PATCH(k32_get_module_base_name_a, "K32GetModuleBaseNameA");
+    RESTORE_PATCH(nvd3dumx_signature, "NvD3DUmx_BrowserDetect");
 
 #undef RESTORE_PATCH
 
