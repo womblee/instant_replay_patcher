@@ -28,6 +28,7 @@ A lightweight tool that enables NVIDIA Shadowplay to record content normally fla
   - `GetModuleFileNameW`
   - `K32GetModuleFileNameExA`
   - `K32GetModuleBaseNameA`
+  - `NvD3DUmx_BrowserDetect`
 - **Patch Now**:
   - You can patch out the NVIDIA restrictions just with a press of a button!
 - **Undo Patches**:
