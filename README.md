@@ -8,12 +8,26 @@ A lightweight tool that enables NVIDIA Shadowplay to record content normally fla
 
 ## Key Features
 - **Automatic Detection**: Monitors and automatically patches the NVIDIA Container process (nvcontainer.exe)
-- **Protection Bypasses**: 
-  - Patches `GetWindowDisplayAffinity` to prevent screen content protection detection.
-  - Patches `Process32FirstW` and `Process32NextW` to prevent process enumeration.
-  - Patches `Module32FirstW` and `Module32NextW` to prevent module enumeration.
-  - Patches `EnumWindows` and `GetWindowInfo` to prevent window enumeration.
-  - Patches `K32EnumProcessModules` to restrict access to enumerating modules.
+- **List of patched functions**:
+  - `OpenProcess`
+  - `Process32FirstW`
+  - `Process32NextW`
+  - `Module32FirstW`
+  - `Module32NextW`
+  - `K32EnumProcessModules`
+  - `EnumWindows`
+  - `GetWindowInfo`
+  - `GetWindowDisplayAffinity`
+  - `GetFileVersionInfoA`
+  - `GetFileVersionInfoSizeA`
+  - `GetModuleHandleA`
+  - `GetModuleHandleW`
+  - `GetModuleHandleExA`
+  - `GetModuleHandleExW`
+  - `GetModuleFileNameA`
+  - `GetModuleFileNameW`
+  - `K32GetModuleFileNameExA`
+  - `K32GetModuleBaseNameA`
 - **Patch Now**:
   - You can patch out the NVIDIA restrictions just with a press of a button!
 - **Undo Patches**:
