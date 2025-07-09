@@ -20,6 +20,7 @@
 #include <shobjidl.h> 
 #include <objbase.h>
 #include <comdef.h>
+#include <tlhelp32.h>
 
 #pragma comment(lib, "d3d11.lib")
 #pragma comment(lib, "dwmapi.lib")
@@ -28,11 +29,10 @@
 // Copyright information
 #define COPYRIGHT_INFO \
 "Made by: nloginov\n" \
-"Concept: furyzenblade\n" \
-"Language: C++ / x64\n\n" \
+"Concept: furyzenblade\n\n" \
 "nlog.us/donate"
 
-#define VERSION "1.4.5.1"
+#define VERSION "1.4.6"
 
 // Namespaces
 namespace fs = std::filesystem;
@@ -220,6 +220,69 @@ struct patch_status {
     };
 };
 
+// Function to return current executable path
+std::string get_current_executable_path() {
+    char buffer[MAX_PATH];
+    GetModuleFileNameA(NULL, buffer, MAX_PATH);
+
+    return std::string(buffer);
+}
+
+// Function to return current executable path (WCHAR version)
+std::wstring get_current_executable_path_wide() {
+    WCHAR buffer[MAX_PATH];
+    GetModuleFileNameW(NULL, buffer, MAX_PATH);
+
+    return std::wstring(buffer);
+}
+
+// Function to check if the program is running as admin
+bool is_running_as_administrator() {
+    BOOL is_admin = FALSE;
+    PSID admin_group = nullptr;
+
+    // Create a SID for the administrators group
+    SID_IDENTIFIER_AUTHORITY nt_authority = SECURITY_NT_AUTHORITY;
+    if (AllocateAndInitializeSid(&nt_authority, 2, SECURITY_BUILTIN_DOMAIN_RID,
+        DOMAIN_ALIAS_RID_ADMINS, 0, 0, 0, 0, 0, 0, &admin_group)) {
+        // Check if the current token is a member of the administrators group
+        if (!CheckTokenMembership(NULL, admin_group, &is_admin)) {
+            is_admin = FALSE;
+        }
+        FreeSid(admin_group);
+    }
+
+    return is_admin == TRUE;
+}
+
+bool is_another_instance_running() {
+    std::wstring current_exe = fs::path(get_current_executable_path_wide()).filename().wstring();
+    int instance_count = 0;
+
+    HANDLE snapshot = CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0);
+    if (snapshot == INVALID_HANDLE_VALUE) {
+        return false;
+    }
+
+    PROCESSENTRY32W pe32;
+    pe32.dwSize = sizeof(PROCESSENTRY32W);
+
+    if (Process32FirstW(snapshot, &pe32)) {
+        do {
+            if (current_exe == pe32.szExeFile) {
+                instance_count++;
+                if (instance_count > 1) {
+                    CloseHandle(snapshot);
+                    return true;
+                }
+            }
+        } while (Process32NextW(snapshot, &pe32));
+    }
+
+    CloseHandle(snapshot);
+    return false;
+}
+
 // Function to set startup registry
 bool set_startup(bool enable) {
     HKEY h_key;
@@ -228,12 +291,9 @@ bool set_startup(bool enable) {
     if (RegOpenKeyExA(HKEY_CURRENT_USER, key_path, 0, KEY_SET_VALUE, &h_key) != ERROR_SUCCESS)
         return false;
 
-    char exe_path[MAX_PATH];
-    GetModuleFileNameA(NULL, exe_path, MAX_PATH);
-
     if (enable) {
-        std::string command = std::string(exe_path);
-        RegSetValueExA(h_key, "NvPatcher", 0, REG_SZ, (BYTE*)command.c_str(), static_cast<DWORD>(command.length() + 1));
+        std::string exe_path = get_current_executable_path();
+        RegSetValueExA(h_key, "NvPatcher", 0, REG_SZ, (BYTE*)exe_path.c_str(), static_cast<DWORD>(exe_path.length() + 1));
     }
     else
         RegDeleteValueA(h_key, "NvPatcher");
@@ -285,8 +345,7 @@ bool set_start_menu_shortcut(bool enable) {
     bool result = false;
 
     // Get executable path (wide char version)
-    WCHAR exe_path[MAX_PATH];
-    GetModuleFileNameW(NULL, exe_path, MAX_PATH);
+    std::wstring exe_path = get_current_executable_path_wide();
 
     // Get Start Menu Programs folder (wide char version)
     WCHAR start_menu_path[MAX_PATH];
@@ -303,8 +362,8 @@ bool set_start_menu_shortcut(bool enable) {
         IPersistFile* ppf = nullptr;
 
         if (SUCCEEDED(CoCreateInstance(CLSID_ShellLink, NULL, CLSCTX_INPROC_SERVER, IID_IShellLinkW, (LPVOID*)&psl))) {
-            psl->SetPath(exe_path);
-            psl->SetWorkingDirectory(std::filesystem::path(exe_path).parent_path().wstring().c_str());
+            psl->SetPath(exe_path.c_str());
+            psl->SetWorkingDirectory(fs::path(exe_path).parent_path().wstring().c_str());
             psl->SetDescription(L"ShadowPlay Patcher - Remove Recording Restrictions");
 
             if (SUCCEEDED(psl->QueryInterface(IID_IPersistFile, (void**)&ppf))) {
@@ -317,8 +376,8 @@ bool set_start_menu_shortcut(bool enable) {
     else {
         // Remove shortcut
         try {
-            if (std::filesystem::exists(shortcut_path)) {
-                result = std::filesystem::remove(shortcut_path);
+            if (fs::exists(shortcut_path)) {
+                result = fs::remove(shortcut_path);
             }
             else {
                 result = true; // Doesn't exist counts as success
@@ -1277,6 +1336,18 @@ void init_autostart_settings(Config& config, patch_status& status, const std::st
 // WinMain - the Windows entry point
 int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPSTR lpCmdLine, int nCmdShow)
 {
+    // Check if running as administrator
+    if (!is_running_as_administrator()) {
+        MessageBoxA(NULL, "This program requires administrator privileges to run.\nPlease run as administrator and try again.", "Administrator Rights Required", MB_OK | MB_ICONERROR);
+        return false;
+    }
+
+    // Verify that there is only one instance of our program
+    if (is_another_instance_running()) {
+        MessageBoxA(NULL, "Another instance of this program is already running.\nPlease close the other instance first.", "Multiple Instances Detected", MB_OK | MB_ICONINFORMATION);
+        return false;
+    }
+
     // Path
     std::string config_path = get_config_path();
 
@@ -1420,7 +1491,7 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPSTR lpCmdLine
 
         if (ImGui::IsItemHovered())
             ImGui::SetTooltip("This tool is intended for educational and security research purposes only.");
-
+        
         // Copyright tooltip indicator
         ImGui::SameLine(ImGui::GetWindowWidth() - 25); // Right-align
         ImGui::TextColored(ImVec4(0.6f, 0.6f, 0.6f, 0.7f), "(?)");
