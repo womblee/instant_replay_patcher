@@ -32,7 +32,7 @@
 "Language: C++ / x64\n\n" \
 "nlog.us/donate"
 
-#define VERSION "1.4.5"
+#define VERSION "1.4.5.1"
 
 // Namespaces
 namespace fs = std::filesystem;
