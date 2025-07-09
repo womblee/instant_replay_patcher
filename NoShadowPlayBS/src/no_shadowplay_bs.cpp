@@ -392,27 +392,6 @@ bool set_start_menu_shortcut(bool enable) {
     return result;
 }
 
-// Function to detect Windows theme preference
-bool is_windows_dark_mode() {
-    HKEY hkey;
-    DWORD value = 0;
-    DWORD size = sizeof(value);
-
-    // Check system theme preference
-    if (RegOpenKeyExW(HKEY_CURRENT_USER,
-        L"Software\\Microsoft\\Windows\\CurrentVersion\\Themes\\Personalize",
-        0, KEY_READ, &hkey) == ERROR_SUCCESS) {
-
-        RegQueryValueExW(hkey, L"AppsUseLightTheme", NULL, NULL,
-            reinterpret_cast<LPBYTE>(&value), &size);
-        RegCloseKey(hkey);
-
-        return value == 0; // 0 = dark mode, 1 = light mode
-    }
-
-    return false; // Default to light mode if registry read fails
-}
-
 // Function to apply Windows-native titlebar styling
 void apply_native_titlebar_style(HWND hwnd, bool dark_mode) {
     if (hwnd == NULL) return;
