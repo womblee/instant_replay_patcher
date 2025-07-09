@@ -69,8 +69,8 @@ struct original_bytes {
     std::vector<uint8_t> window_display_affinity_bytes;
 
     // Module info
-    std::vector<uint8_t> get_file_version_info_a_bytes;
-    std::vector<uint8_t> get_file_version_info_size_a_bytes;
+    /*std::vector<uint8_t> get_file_version_info_a_bytes;
+    std::vector<uint8_t> get_file_version_info_size_a_bytes;*/
     std::vector<uint8_t> get_module_handle_a_bytes;
     std::vector<uint8_t> get_module_handle_w_bytes;
     std::vector<uint8_t> get_module_handle_ex_a_bytes;
@@ -93,8 +93,8 @@ struct original_bytes {
     uintptr_t enum_windows_address = 0;
     uintptr_t get_window_info_address = 0;
     uintptr_t window_display_affinity_address = 0;
-    uintptr_t get_file_version_info_a_address = 0;
-    uintptr_t get_file_version_info_size_a_address = 0;
+    /*uintptr_t get_file_version_info_a_address = 0;
+    uintptr_t get_file_version_info_size_a_address = 0;*/
     uintptr_t get_module_handle_a_address = 0;
     uintptr_t get_module_handle_w_address = 0;
     uintptr_t get_module_handle_ex_a_address = 0;
@@ -454,8 +454,8 @@ void save_patch_info(const original_bytes& orig_bytes, const std::string& config
     file.write(reinterpret_cast<const char*>(&orig_bytes.enum_windows_address), sizeof(orig_bytes.enum_windows_address));
     file.write(reinterpret_cast<const char*>(&orig_bytes.get_window_info_address), sizeof(orig_bytes.get_window_info_address));
     file.write(reinterpret_cast<const char*>(&orig_bytes.enum_modules_address), sizeof(orig_bytes.enum_modules_address));
-    file.write(reinterpret_cast<const char*>(&orig_bytes.get_file_version_info_a_address), sizeof(orig_bytes.get_file_version_info_a_address));
-    file.write(reinterpret_cast<const char*>(&orig_bytes.get_file_version_info_size_a_address), sizeof(orig_bytes.get_file_version_info_size_a_address));
+    /*file.write(reinterpret_cast<const char*>(&orig_bytes.get_file_version_info_a_address), sizeof(orig_bytes.get_file_version_info_a_address));
+    file.write(reinterpret_cast<const char*>(&orig_bytes.get_file_version_info_size_a_address), sizeof(orig_bytes.get_file_version_info_size_a_address));*/
     file.write(reinterpret_cast<const char*>(&orig_bytes.get_module_handle_a_address), sizeof(orig_bytes.get_module_handle_a_address));
     file.write(reinterpret_cast<const char*>(&orig_bytes.get_module_handle_w_address), sizeof(orig_bytes.get_module_handle_w_address));
     file.write(reinterpret_cast<const char*>(&orig_bytes.get_module_handle_ex_a_address), sizeof(orig_bytes.get_module_handle_ex_a_address));
@@ -485,8 +485,8 @@ void save_patch_info(const original_bytes& orig_bytes, const std::string& config
     write_bytes(orig_bytes.enum_windows_bytes);
     write_bytes(orig_bytes.get_window_info_bytes);
     write_bytes(orig_bytes.enum_modules_bytes);
-    write_bytes(orig_bytes.get_file_version_info_a_bytes);
-    write_bytes(orig_bytes.get_file_version_info_size_a_bytes);
+    /*write_bytes(orig_bytes.get_file_version_info_a_bytes);
+    write_bytes(orig_bytes.get_file_version_info_size_a_bytes);*/
     write_bytes(orig_bytes.get_module_handle_a_bytes);
     write_bytes(orig_bytes.get_module_handle_w_bytes);
     write_bytes(orig_bytes.get_module_handle_ex_a_bytes);
@@ -521,8 +521,8 @@ bool load_patch_info(original_bytes& orig_bytes, const std::string& config_path)
         file.read(reinterpret_cast<char*>(&orig_bytes.enum_windows_address), sizeof(orig_bytes.enum_windows_address));
         file.read(reinterpret_cast<char*>(&orig_bytes.get_window_info_address), sizeof(orig_bytes.get_window_info_address));
         file.read(reinterpret_cast<char*>(&orig_bytes.enum_modules_address), sizeof(orig_bytes.enum_modules_address));
-        file.read(reinterpret_cast<char*>(&orig_bytes.get_file_version_info_a_address), sizeof(orig_bytes.get_file_version_info_a_address));
-        file.read(reinterpret_cast<char*>(&orig_bytes.get_file_version_info_size_a_address), sizeof(orig_bytes.get_file_version_info_size_a_address));
+        /*file.read(reinterpret_cast<char*>(&orig_bytes.get_file_version_info_a_address), sizeof(orig_bytes.get_file_version_info_a_address));
+        file.read(reinterpret_cast<char*>(&orig_bytes.get_file_version_info_size_a_address), sizeof(orig_bytes.get_file_version_info_size_a_address));*/
         file.read(reinterpret_cast<char*>(&orig_bytes.get_module_handle_a_address), sizeof(orig_bytes.get_module_handle_a_address));
         file.read(reinterpret_cast<char*>(&orig_bytes.get_module_handle_w_address), sizeof(orig_bytes.get_module_handle_w_address));
         file.read(reinterpret_cast<char*>(&orig_bytes.get_module_handle_ex_a_address), sizeof(orig_bytes.get_module_handle_ex_a_address));
@@ -553,8 +553,8 @@ bool load_patch_info(original_bytes& orig_bytes, const std::string& config_path)
         read_bytes(orig_bytes.enum_windows_bytes);
         read_bytes(orig_bytes.get_window_info_bytes);
         read_bytes(orig_bytes.enum_modules_bytes);
-        read_bytes(orig_bytes.get_file_version_info_a_bytes);
-        read_bytes(orig_bytes.get_file_version_info_size_a_bytes);
+        /*read_bytes(orig_bytes.get_file_version_info_a_bytes);
+        read_bytes(orig_bytes.get_file_version_info_size_a_bytes);*/
         read_bytes(orig_bytes.get_module_handle_a_bytes);
         read_bytes(orig_bytes.get_module_handle_w_bytes);
         read_bytes(orig_bytes.get_module_handle_ex_a_bytes);
@@ -915,7 +915,7 @@ std::vector<patch_config> get_patch_configs(patch_status& status) {
         & status.orig_bytes.window_display_affinity_bytes,
         & status.orig_bytes.window_display_affinity_address, 6);
 
-    configs.emplace_back("GetFileVersionInfoA", L"VERSION.dll", patch_type::RETURN_FALSE,
+    /*configs.emplace_back("GetFileVersionInfoA", L"VERSION.dll", patch_type::RETURN_FALSE,
         std::vector<uint8_t>{0x33, 0xC0, 0xC3},
         & status.orig_bytes.get_file_version_info_a_bytes,
         & status.orig_bytes.get_file_version_info_a_address, 6);
@@ -923,7 +923,7 @@ std::vector<patch_config> get_patch_configs(patch_status& status) {
     configs.emplace_back("GetFileVersionInfoSizeA", L"VERSION.dll", patch_type::RETURN_FALSE,
         std::vector<uint8_t>{0x33, 0xC0, 0xC3},
         & status.orig_bytes.get_file_version_info_size_a_bytes,
-        & status.orig_bytes.get_file_version_info_size_a_address, 6);
+        & status.orig_bytes.get_file_version_info_size_a_address, 6);*/
 
     configs.emplace_back("GetModuleHandleA", L"KERNEL32.dll", patch_type::RETURN_FALSE,
         std::vector<uint8_t>{0x48, 0x31, 0xC0, 0xC3},
@@ -1035,8 +1035,8 @@ bool undo_patches(patch_status& status, const std::string& config_path) {
     RESTORE_PATCH(enum_windows, "EnumWindows");
     RESTORE_PATCH(get_window_info, "GetWindowInfo");
     RESTORE_PATCH(enum_modules, "K32EnumProcessModules");
-    RESTORE_PATCH(get_file_version_info_a, "GetFileVersionInfoA");
-    RESTORE_PATCH(get_file_version_info_size_a, "GetFileVersionInfoSizeA");
+    // RESTORE_PATCH(get_file_version_info_a, "GetFileVersionInfoA");
+    // RESTORE_PATCH(get_file_version_info_size_a, "GetFileVersionInfoSizeA");
     RESTORE_PATCH(get_module_handle_a, "GetModuleHandleA");
     RESTORE_PATCH(get_module_handle_w, "GetModuleHandleW");
     RESTORE_PATCH(get_module_handle_ex_a, "GetModuleHandleExA");
