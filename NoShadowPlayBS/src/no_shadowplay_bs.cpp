@@ -1145,7 +1145,23 @@ void patching_thread(patch_status* status, const std::string& config_path) {
             status->wait_for_process = false;
             DWORD nvcontainer_process_id = filtered_process_ids[0];
             status->target_process_id = nvcontainer_process_id;
-            status->orig_bytes.process_id = nvcontainer_process_id;
+
+            /*
+                Check if this process is already patched, if we don't do this and have auto-patch on launch selected
+                ...while it's already patched, it's gonna have an infinite loop of trying to patch the nvidia process
+            */
+            if (status->orig_bytes.process_id == nvcontainer_process_id && status->is_patched) {
+                add_log(*status, "Cancelling the patch operation", patch_status::log_level::INFO);
+                status->manual_patch_requested = false;
+
+                // Auto close if requested
+                if (status->auto_close)
+                    status->is_running = false;
+
+                std::this_thread::sleep_for(std::chrono::milliseconds(100));
+                continue;
+            }
+
             add_log(*status, "Correct process found. PID: " + std::to_string(nvcontainer_process_id), patch_status::log_level::SUCCESS);
 
             // Open the process
