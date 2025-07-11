@@ -32,7 +32,7 @@
 "Concept: furyzenblade\n\n" \
 "nlog.us/donate"
 
-#define VERSION "1.4.6"
+#define VERSION "1.4.7"
 
 // Namespaces
 namespace fs = std::filesystem;
