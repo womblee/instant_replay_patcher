@@ -6,6 +6,11 @@ A lightweight tool that enables NVIDIA Shadowplay to record content normally fla
 
 ![image](https://github.com/user-attachments/assets/a75dae0b-321e-41c7-bc0f-f47d9f805711)
 
+## Simpler Solution
+Instead of using this tool, **you can simply switch browsers**!
+
+NVIDIA **doesn't detect** Brave and some other browsers **AT ALL**, and you can even use websites with Google Widevine DRM!
+
 ## Key Features
 - **Automatic Detection**: Monitors and automatically patches the NVIDIA Container process (nvcontainer.exe)
 - **List of patched functions**:
